@@ -6,6 +6,7 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.ResultSet
 import java.time.Instant
+import dev.orchestrator.policy.ProjectPolicy
 
 /**
  * Durable storage only. This is NOT the WorkflowEngine and grants no execution or publication
@@ -53,6 +54,98 @@ class SqliteTaskStore(databasePath: Path) {
                 statement.setString(3, project.kind.name)
                 statement.setString(4, project.workspaceRoot)
                 statement.executeUpdate()
+            }
+            conn.prepareStatement("INSERT INTO project_policies(repository_id) VALUES (?)").use {
+                it.setLong(1, project.repositoryId)
+                check(it.executeUpdate() == 1)
+            }
+        }
+    }
+
+    /** Read an owner-managed policy snapshot. No approvals are inferred from project kind. */
+    fun findPolicy(repositoryId: Long): ProjectPolicy? = connection().use { conn ->
+        conn.prepareStatement(
+            """
+            SELECT p.project_id, p.repository_id, p.kind, p.workspace_root,
+                   p.policy_version, pp.personal_auto_execution,
+                   pp.work_owner_execution_approved, pp.work_owner_publication_approved
+            FROM projects p JOIN project_policies pp ON pp.repository_id = p.repository_id
+            WHERE p.repository_id = ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setLong(1, repositoryId)
+            statement.executeQuery().use { result ->
+                if (!result.next()) null else ProjectPolicy(
+                    projectId = result.getString("project_id"),
+                    repositoryId = result.getLong("repository_id"),
+                    kind = ProjectKind.valueOf(result.getString("kind")),
+                    workspaceRoot = Path.of(result.getString("workspace_root")),
+                    personalAutoExecution = result.getInt("personal_auto_execution") == 1,
+                    workOwnerExecutionApproved = result.getInt("work_owner_execution_approved") == 1,
+                    workOwnerPublicationApproved = result.getInt("work_owner_publication_approved") == 1,
+                    version = result.getLong("policy_version"),
+                )
+            }
+        }
+    }
+
+    /**
+     * Trusted-owner boundary only: not wired to HTTP, Issue or agents.
+     * Compare-and-swap preserves version and audit under concurrent owner updates.
+     */
+    fun updatePolicyFromTrustedOwner(policy: ProjectPolicy, expectedVersion: Long): Boolean =
+        transaction { conn ->
+            val updated = conn.prepareStatement(
+                """
+                UPDATE projects SET policy_version = policy_version + 1
+                WHERE repository_id = ? AND project_id = ? AND kind = ?
+                  AND workspace_root = ? AND policy_version = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setLong(1, policy.repositoryId)
+                statement.setString(2, policy.projectId)
+                statement.setString(3, policy.kind.name)
+                statement.setString(4, policy.workspaceRoot.toString())
+                statement.setLong(5, expectedVersion)
+                statement.executeUpdate() == 1
+            }
+            if (updated) {
+                conn.prepareStatement(
+                    """
+                    UPDATE project_policies SET personal_auto_execution = ?,
+                        work_owner_execution_approved = ?,
+                        work_owner_publication_approved = ?
+                    WHERE repository_id = ?
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setInt(1, if (policy.personalAutoExecution) 1 else 0)
+                    statement.setInt(2, if (policy.workOwnerExecutionApproved) 1 else 0)
+                    statement.setInt(3, if (policy.workOwnerPublicationApproved) 1 else 0)
+                    statement.setLong(4, policy.repositoryId)
+                    check(statement.executeUpdate() == 1)
+                }
+                conn.prepareStatement(
+                    """
+                    INSERT INTO project_policy_events(repository_id, policy_version, recorded_at)
+                    VALUES (?, ?, ?)
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setLong(1, policy.repositoryId)
+                    statement.setLong(2, expectedVersion + 1)
+                    statement.setString(3, Instant.now().toString())
+                    check(statement.executeUpdate() == 1)
+                }
+            }
+            updated
+        }
+
+    fun policyVersions(repositoryId: Long): List<Long> = connection().use { conn ->
+        conn.prepareStatement(
+            "SELECT policy_version FROM project_policy_events WHERE repository_id = ? ORDER BY policy_version",
+        ).use { statement ->
+            statement.setLong(1, repositoryId)
+            statement.executeQuery().use { result ->
+                buildList { while (result.next()) add(result.getLong(1)) }
             }
         }
     }
@@ -281,12 +374,40 @@ class SqliteTaskStore(databasePath: Path) {
                         it.execute("PRAGMA user_version = $SCHEMA_VERSION")
                     }
                 }
+                if (currentVersion < 2) {
+                    SCHEMA_V2.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 2") }
+                }
             }
         }
     }
 
     private companion object {
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
+
+        val SCHEMA_V2 = listOf(
+            """
+            CREATE TABLE project_policies(
+                repository_id INTEGER PRIMARY KEY REFERENCES projects(repository_id),
+                personal_auto_execution INTEGER NOT NULL DEFAULT 0 CHECK(personal_auto_execution IN (0,1)),
+                work_owner_execution_approved INTEGER NOT NULL DEFAULT 0 CHECK(work_owner_execution_approved IN (0,1)),
+                work_owner_publication_approved INTEGER NOT NULL DEFAULT 0 CHECK(work_owner_publication_approved IN (0,1))
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE project_policy_events(
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repository_id INTEGER NOT NULL REFERENCES projects(repository_id),
+                policy_version INTEGER NOT NULL CHECK(policy_version > 0),
+                recorded_at TEXT NOT NULL,
+                UNIQUE(repository_id, policy_version)
+            )
+            """.trimIndent(),
+            """
+            INSERT INTO project_policies(repository_id)
+            SELECT repository_id FROM projects
+            """.trimIndent(),
+        )
 
         val SCHEMA_V1 = listOf(
             """
