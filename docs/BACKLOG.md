@@ -28,8 +28,8 @@
 
 | Key | Issue | Depends on | Definition of Done |
 |---|---|---|---|
-| M2-01 | Generic runner + Codex adapter + sandbox Gate S0 | M1-04,M1-06 | Один настоящий Coding в разрешённом проекте с валидной model/effort и изоляцией |
-| M2-02 | Linux sandbox и worker cleanup evidence | M2-01 | Таймаут/перезапуск не задевают чужие процессы |
+| M2-01 | Native Codex `exec` adapter + короткий real CLI smoke | M1-04,M1-06 | Один настоящий Coding через Kotlin на disposable PERSONAL repo, реальный файл/diff подтверждён |
+| M2-02 | Native workspace-write, timeout и child-process cleanup | M2-01 | Нет Docker/systemd sandbox engine; timeout/restart не повторяет UNKNOWN attempt |
 | M2-03 | Real verification evidence and logging | M2-01 | PASS/FAIL/NOT_RUN проверяемы |
 | M2-04 | Restart recovery for coding attempts | M2-02,M2-03 | Нет повторного старта UNKNOWN attempt |
 
