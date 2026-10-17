@@ -9,6 +9,10 @@ DevOrchestrator — собственная платформа управлени
 
 Планируемый стек: Kotlin/JVM, Ktor, Kotlin Coroutines, SQLite, Linux на WORK. Android Monitor и Android Control предусмотрены как отдельные этапы M5–M6 после работающего серверного MVP.
 
+**Гибкие AI-агенты (PRD FR-13–FR-18, DRAFT):** Agent Catalog + Agent Profiles для Coding/Review/Planner/Chief; выбор Codex/Cursor/другого интегрированного агента, модели и reasoning effort вручную или автоматически по задаче. Менять профили можно без остановки сервиса, но новая конфигурация применяется только к следующему attempt. Автоселектор не выдаёт дополнительных прав. Первый E2E — Codex; второй адаптер и AUTO routing — M4.
+
+**Sandbox (ADR-003, DRAFT):** проверить Docker Sandboxes microVM в clone mode с широкими правами внутри VM, без передачи хостовых файлов/ключей; выбрать реальный runtime только после Gate S0.
+
 ## Документы
 
 - [PRD / ТЗ v0.1](docs/PRD.md) — **DRAFT**, требует согласования.
