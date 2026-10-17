@@ -6,7 +6,7 @@
 |---|---|---|
 | **M0** | PRD, ADR-001..005, acceptance, backlog, угрозы/разрешения | Владелец утвердил документы и стартовый backlog; реализации нет |
 | **M1** | JVM/Ktor skeleton, SQLite, GitHub intake, Project Registry + Agent Catalog/Profile schema | Реальная Issue принимается один раз; роли и agent profiles валидируются и сохраняются |
-| **M2** | Generic AgentRunner + первый Codex Adapter, Gate S0 для готового sandbox, artifacts | Система сама выполнила одну реальную Coding-задачу без ручного запуска; выбранный sandbox PASS |
+| **M2** | Минимальный Native Codex CLI Adapter (`codex exec`), изолированный временный PERSONAL worktree, artifacts/exit/cleanup | Реальный `codex exec` запущен из Kotlin и создал проверенный diff; Docker не устанавливается |
 | **M3** | Independent Review, bounded corrections, Git Publisher, Draft PR | Настоящая Issue дошла до **Draft PR** через автоматическую цепочку; Merge нет |
 | **M4** | Persistent service/recovery + второй реальный Agent Adapter и auto routing между разрешёнными ролями/моделями/effort | После restart задачи продолжаются; 2 адаптера и AUTO_RULES/AUTO_AI E2E без смены прав |
 | **M5** | Android Monitor (read-only) | Проекты, статусы, события, блокеры видны с телефона через защищённый API |
