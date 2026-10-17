@@ -44,7 +44,7 @@ sealed interface PolicyDecision {
  * Lexical containment is not an OS security boundary. Future native runner must revalidate
  * resolved paths, symlinks and workspace identity immediately at process launch.
  */
-class ProjectPolicyEvaluator {
+internal class ProjectPolicyEvaluator {
     fun evaluate(
         policies: Collection<ProjectPolicy>,
         repositoryId: Long,
@@ -88,8 +88,8 @@ class ProjectPolicyEvaluator {
  */
 class ProjectRegistry(
     private val store: SqliteTaskStore,
-    private val evaluator: ProjectPolicyEvaluator = ProjectPolicyEvaluator(),
 ) {
+    private val evaluator = ProjectPolicyEvaluator()
     fun evaluate(repositoryId: Long, workspace: Path, action: ProjectAction): PolicyDecision {
         val snapshot = try {
             store.findPolicy(repositoryId)
