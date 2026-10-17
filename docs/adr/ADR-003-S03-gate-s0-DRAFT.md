@@ -1,5 +1,8 @@
 # ADR-003 / S-03 — Короткий Gate S0 перед разработкой AgentRunner
 
+> **DEFERRED:** это план проверки **Docker microVM**, а не обязательный Gate для первого MVP после [S-04 native CLI](ADR-003-MVP-native-cli-decision.md). Для первого MVP достаточно короткого headless `codex exec` smoke в disposable PERSONAL repo. Никакого S0 VM или установки Docker на пути к первому Draft PR.
+
+
 **Статус: DRAFT — не согласовано.** 2026-10-17. Этап M0, Issue #3.
 **Основа:** S-01/S-02 (APPROVED), ADR-001/ADR-002 (APPROVED). Никакие runtime-тесты на WORK ещё не выполнялись.
 
