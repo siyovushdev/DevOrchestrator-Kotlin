@@ -1,6 +1,6 @@
 # ADR-005 — Agent Adapter, независимый Review и динамические профили
 
-**Статус:** DRAFT / ожидает согласования Owner. **Этап:** M0 · [Issue #5](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/5).  
+**Статус:** APPROVED (Owner, 2026-10-17), как контракт и последовательность реализации; реальный Codex E2E ещё не выполнен. **Этап:** M0 · [Issue #5](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/5).  
 **Основа:** ADR-001/002 APPROVED, S-04 Native Codex CLI APPROVED для первого MVP. Без Kotlin-кода на данном этапе.
 
 ## 1. Сначала рабочий E2E, потом второй агент
@@ -53,4 +53,4 @@
 - При 2 correction циклах → NEEDS_OWNER; при PASS → Draft PR (ADR-004).
 - Конфигурация второго адаптера/модели не меняет Kotlin WorkflowEngine и не поднимает права проекта.
 
-**Решение для согласования:** один универсальный interface с первым Codex-native adapter, независимая новая Review сессия, настоящий Draft PR как результат M3, расширение/автовыбор — после этого.
+**Решение APPROVED:** один универсальный interface с первым Codex-native adapter, независимая новая Review сессия, настоящий Draft PR как результат M3, расширение/автовыбор — после этого.
