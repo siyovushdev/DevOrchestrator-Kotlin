@@ -360,6 +360,13 @@ class SqliteTaskStore(databasePath: Path) {
                 return@transaction IssueIntakeReceipt(IssueIntakeOutcome.CREATED, proposedWorkflowId)
             }
 
+            // A previously established owner hold is the durable truth. Never claim DUPLICATE
+            // or replace its original blocker when a later poll sees a different source.
+            if (current.hold == WorkflowHold.NEEDS_OWNER) {
+                return@transaction IssueIntakeReceipt(
+                    IssueIntakeOutcome.NEEDS_OWNER, current.id, current.holdReason,
+                )
+            }
             val pinned = readPinnedIssue(conn, issue.repositoryId, issue.issueNumber)
             val changed = !issue.open || pinned == null ||
                 pinned.githubIssueId != issue.githubIssueId ||
