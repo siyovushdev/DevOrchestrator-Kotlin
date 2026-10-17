@@ -1,7 +1,7 @@
 # DevOrchestrator — Kotlin/JVM
 
 > **Стадия:** M0 — проектирование. Реализация не начата.  
-> **Утверждено:** только [ADR-001 — Project Registry и политики проектов](docs/adr/ADR-001-project-registry.md).
+> **Утверждено:** [ADR-001 — Project Registry](docs/adr/ADR-001-project-registry.md) и [ADR-002 — Lifecycle/Recovery](docs/adr/ADR-002-lifecycle-DRAFT.md).
 
 DevOrchestrator — собственная платформа управления задачами разработки и ИИ-агентами.
 
@@ -17,11 +17,11 @@ DevOrchestrator — собственная платформа управлени
 - [Backlog, зависимости и ссылки на M0 Issues](docs/BACKLOG.md) — **DRAFT**.
 - [Реестр архитектурных решений](docs/DECISIONS.md).
 - [ADR-001: Project Registry](docs/adr/ADR-001-project-registry.md) — **APPROVED**.
-- [ADR-002: lifecycle и recovery](docs/adr/ADR-002-lifecycle-DRAFT.md) — **DRAFT**, обсуждаем следующим.
+- [ADR-002: lifecycle и recovery](docs/adr/ADR-002-lifecycle-DRAFT.md) — **APPROVED**; [R-06 — формальные переходы/F01–F20](docs/adr/ADR-002-R06-state-machine-DRAFT.md) — **APPROVED**.
 
 ## Этап M0 — согласование, без написания кода
 
-Открыты шесть задач проектирования:
+Созданы шесть задач проектирования; часть решений уже утверждена:
 
 [#1 PRD](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/1) · [#2 ADR-002](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/2) · [#3 ADR-003](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/3) · [#4 ADR-004](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/4) · [#5 ADR-005](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/5) · [#6 Финальная приёмка M0](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/6).
 
@@ -34,4 +34,4 @@ DevOrchestrator — собственная платформа управлени
 5. Запрещены автоматический Merge, самовыдача прав агентам, blind retry неопределённых GitHub эффектов.
 6. Старый Python DevOrchestrator остаётся отдельным историческим проектом, не является кодовой базой новой версии.
 
-**Следующий содержательный шаг:** согласовать ADR-002 (жизненный цикл и восстановление после сбоев).
+**Следующий содержательный шаг:** согласовать ADR-003 — trust boundary, sandbox и токены. До полного M0 Kotlin-код не писать.
