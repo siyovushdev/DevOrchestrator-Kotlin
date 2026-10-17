@@ -739,6 +739,38 @@ class SqliteTaskStore(databasePath: Path) {
                 SELECT RAISE(ABORT, 'immutable agent profile version');
             END
             """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_agent_manifest_provider_change
+            BEFORE UPDATE OF provider ON agent_manifest_heads BEGIN
+                SELECT RAISE(ABORT, 'immutable adapter provider identity');
+            END
+            """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_agent_profile_identity_change
+            BEFORE UPDATE OF repository_id,role ON agent_profile_heads BEGIN
+                SELECT RAISE(ABORT, 'immutable project and profile role identity');
+            END
+            """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_cross_project_agent_binding_insert
+            BEFORE INSERT ON agent_role_bindings
+            WHEN NOT EXISTS (
+                SELECT 1 FROM agent_profile_heads h WHERE h.profile_id=NEW.profile_id
+                  AND h.repository_id=NEW.repository_id AND h.role=NEW.role
+            ) BEGIN
+                SELECT RAISE(ABORT, 'cross-project or wrong-role agent binding');
+            END
+            """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_cross_project_agent_binding_update
+            BEFORE UPDATE ON agent_role_bindings
+            WHEN NOT EXISTS (
+                SELECT 1 FROM agent_profile_heads h WHERE h.profile_id=NEW.profile_id
+                  AND h.repository_id=NEW.repository_id AND h.role=NEW.role
+            ) BEGIN
+                SELECT RAISE(ABORT, 'cross-project or wrong-role agent binding');
+            END
+            """.trimIndent(),
         )
 
         val SCHEMA_V3 = listOf(
