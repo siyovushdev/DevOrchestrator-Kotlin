@@ -181,6 +181,24 @@ class SqliteAgentCatalogTest {
         assertFalse(db.declareManifest(manifest(2), 1, actor)) // stale expected version
     }
 
+    @Test fun specificRoleAndSandboxCapabilitiesAreCheckedNotJustModelName() {
+        val roleLimited = manifest().copy(roles = setOf(AgentRole.CODING))
+        val review = profile(id = "review-limited", role = AgentRole.REVIEW,
+            model = "review-model", effort = ReasoningEffort.HIGH,
+            sandbox = AgentSandbox.NATIVE_PERSONAL_READ_ONLY)
+        assertFailsWith<IllegalArgumentException> {
+            AgentProfileCompatibility.validateDeclared(roleLimited, review, ProjectKind.PERSONAL)
+        }
+        val sandboxLimited = manifest().copy(
+            sandboxes = setOf(AgentSandbox.NATIVE_PERSONAL_WRITE))
+        assertFailsWith<IllegalArgumentException> {
+            AgentProfileCompatibility.validateDeclared(sandboxLimited, review, ProjectKind.PERSONAL)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AgentProfileCompatibility.validateDeclared(manifest(), review, ProjectKind.WORK)
+        }
+    }
+
     @Test fun duplicateAndStaleCasAreNoOpsWithoutHistoryAmplification() {
         registerProjects()
         val db = catalog()
@@ -249,6 +267,27 @@ class SqliteAgentCatalogTest {
         }
         assertEquals(manifest(), catalog().findManifest("native-cli", 1))
         assertEquals(profile(), catalog().findProfile("coding-alpha", 1))
+        DriverManager.getConnection("jdbc:sqlite:${path()}").use { conn ->
+            conn.createStatement().use { stmt ->
+                assertFailsWith<SQLException> {
+                    stmt.executeUpdate("UPDATE agent_manifest_heads SET provider='forged'")
+                }
+                assertFailsWith<SQLException> {
+                    stmt.executeUpdate(
+                        "UPDATE agent_profile_heads SET repository_id=102 WHERE profile_id='coding-alpha'"
+                    )
+                }
+                assertFailsWith<SQLException> {
+                    stmt.executeUpdate(
+                        """
+                        INSERT INTO agent_role_bindings(repository_id,role,profile_id,
+                            profile_version,assignment_version,recorded_by,updated_at)
+                        VALUES (102,'CODING','coding-alpha',1,1,'owner:test','now')
+                        """.trimIndent()
+                    )
+                }
+            }
+        }
     }
 
     @Test fun completeV3MigrationKeepsPinnedIssueAndPolicyIntact() {
