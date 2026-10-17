@@ -29,6 +29,7 @@ class SqliteTaskStoreTest {
                 kind = ProjectKind.PERSONAL,
                 workspaceRoot = directory.toString(),
             ),
+            ownerActorId = "owner:test",
         )
     }
 
@@ -191,6 +192,7 @@ class SqliteTaskStoreTest {
         assertFailsWith<SQLException> {
             store.insertProject(
                 RegisteredProject("other-name", 411, ProjectKind.WORK, directory.toString()),
+                ownerActorId = "owner:test",
             )
         }
         assertNotNull(store.enqueue(411, 1, "one-workflow"))
