@@ -36,7 +36,7 @@ class SqliteTaskStoreTest {
     @Test
     fun migrationsAreIdempotentAndPreserveDataOnRestart() {
         val first = createStore()
-        assertEquals(3, first.schemaVersion())
+        assertEquals(4, first.schemaVersion())
         register(first)
 
         val created = first.enqueue(411, 21, "workflow-1")
@@ -45,7 +45,7 @@ class SqliteTaskStoreTest {
         assertEquals(0L, created.version)
 
         val reopened = createStore()
-        assertEquals(3, reopened.schemaVersion())
+        assertEquals(4, reopened.schemaVersion())
         assertEquals(created, reopened.findWorkflow(411, 21))
         assertEquals(listOf("WORKFLOW_QUEUED"), reopened.listEvents(created.id).map { it.type })
     }
