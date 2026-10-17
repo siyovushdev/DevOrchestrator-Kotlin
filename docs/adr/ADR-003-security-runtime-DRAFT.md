@@ -1,12 +1,26 @@
 # ADR-003 — безопасность без повторения permission-блокировок
 
-**Статус:** DRAFT / PROPOSAL, требуется согласование владельца.  
+**Статус:** DRAFT — **S-01 APPROVED владельцем 2026-10-17** (стратегия Docker Sandboxes microVM + Gate S0 + отдельный Publisher). Остальные детали ADR-003 и готовность runtime не утверждены.  
 **Этап:** M0, [Issue #3](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/3).  
 **Основа:** ADR-001 и ADR-002 — APPROVED. **Не разрешает написание кода, создание runtime grants или запуск агентов.**
 
 ## 1. Цель
 
 У DevOrchestrator должны быть реальные границы безопасности, не блокирующие уже подтверждённое выполнение. Избегать самодельного многослойного управления Linux sandbox, множества несовместимых конфигураций и вручную создаваемых per-Issue launch scripts/approvals. Ошибка прав — диагностируемый отказ **до потребления попытки**, а не повод очищать state.
+
+## S-01 — базовая стратегия изоляции (APPROVED, 2026-10-17)
+
+**Решение владельца:** основной runtime для Coding/Review и последующих поддерживаемых AI-агентов — **готовые Docker Sandboxes (`sbx`) с microVM**, при условии фактического **Gate S0 PASS** на рабочей машине. Для каждой задачи/сессии используем изолированную копию соответствующего проекта (предпочтительно `--clone`); вывод diff/artifacts передаём доверенному Controller/Publisher через проверяемый и ограниченный путь.
+
+1. **Свобода внутри VM:** агент может выполнять терминальные команды, менять исходники *в копии*, устанавливать зависимости, использовать `sudo` и частный Docker Engine *внутри microVM*, собирать/тестировать проект. При работе через `sbx` внутренняя песочница Codex может быть отключена, **но только в проверенной VM-изоляции**. Не создавать второй конфликтующий permission/sandbox engine.
+2. **Без доступа к хосту:** не прокидывать host Docker socket, writable рабочий каталог хоста, `SSH_AUTH_SOCK`, ключи публикации, служебные MCP/SSH-инструменты с host powers, чужие проекты; по умолчанию отказаться от общего host skills mount (`--skills=off`, при поддержке версии). Сеть контролируется исходящей политикой, доступ к провайдерам моделей и пакетным репозиториям проверяется.
+3. **Отдельный Publisher:** только доверенный компонент Kotlin-сервиса за границей agent VM владеет GitHub publication credentials и может выполнить Commit/Push/**Draft PR** после PASS всех нужных проверок. Никакого автоматического Merge.
+4. **Много агентов:** Codex, Cursor, Claude, Gemini и другие совместимые с `sbx` используют **один тип изоляции**, но каждому агенту всё равно требуется проверенный CLI/adapter, модель, auth и отдельный независимый Review-контекст. Kimi или любой иной отсутствующий в каталоге агент допускается только после проверенной кастомной интеграции.
+5. **Обязательная проверка до исполнения:** Gate S0 должен подтвердить Ubuntu/KVM/доступ к VM, реальный login/inference, код/Gradle/build, сбор артефактов, stop/cleanup, host boundary и network policy. До PASS статус исполнения `NOT_READY`, не делать настоящую task attempt и не считать Docker Sandboxes внедрённым.
+6. **При несовместимости:** зафиксировать конкретный S0 FAIL, не подменять runtime обычным привилегированным `docker run`, host Codex `--dangerously-bypass...` или другим незащищённым fallback. Альтернатива требует отдельного согласования владельца в ADR-003.
+7. **Не путать изоляцию с доверием:** даже sandbox с sudo и разрешённой сетью способен посылать данные на разрешённые адреса; код, секреты и egress нужно ограничивать перед передачей агенту. Ключи Publisher в VM не передавать.
+
+**Статус решения:** S-01 APPROVED как стратегия; Docker Sandboxes **не установлен и не проверен на WORK**. Полный ADR-003 DRAFT до согласования authority/security details и Gate S0; начало Kotlin-разработки требует завершения M0.
 
 ## 2. Предлагаемые границы доверия
 
@@ -31,17 +45,17 @@
 
 ## 4. Не писать собственный sandbox engine
 
-**Кандидат A:** поддерживаемый sandbox в изолированной microVM (например, Docker Sandboxes `sbx`, если подтверждены совместимость KVM/Ubuntu, управление CLI, credentials, ресурсы и clone-mode).
+**Выбранный основной кандидат S-01 (APPROVED как стратегия):** Docker Sandboxes `sbx` в изолированной microVM. Его фактическая пригодность **условна до Gate S0 PASS** (KVM/Ubuntu, CLI, clone mode, credentials и необходимые ресурсы).
 
-**Кандидат B:** Codex native sandbox `workspace-write` под отдельной низкопривилегированной OS-учётной записью и минимально необходимым systemd confinement. Не наслаивать дополнительный bubblewrap/AppArmor/ProcSubset без подтверждённой совместимости.
+**Запасной вариант (не утверждён к использованию):** Codex native sandbox `workspace-write` под отдельной низкопривилегированной OS-учётной записью. Рассматривать только после S0 FAIL и **отдельного согласования Owner**, без самодельного наложения AppArmor/bubblewrap/systemd профилей.
 
-Решение A/B пока **НЕ принято**. Ранее зафиксированные блокеры systemd/`/proc/self/exe`, двойного sandbox и авторизации — обязательные отрицательные сценарии. Не выбирать runtime только по документации или unit-тестам.
+**Стратегия A утверждена (S-01); эксплуатационная готовность ещё не доказана.** Ранее зафиксированные блокеры systemd/`/proc/self/exe`, двойного sandbox и авторизации — обязательные отрицательные сценарии. Не считать документацию или unit-тесты заменой Gate S0.
 
 Правило secrets: publisher GitHub token хранится только вне AgentRunner/agent VM; inference credentials отделены. Приватный исходный код допускается только в доверенную изолированную копию. Любые MCP/SSH/host-mounted sockets и shared directories считаются потенциальным выходом за границу и запрещены по умолчанию.
 
-## 4A. Широкие права внутри microVM без доступа к хосту (DRAFT)
+## 4A. Широкие права внутри microVM без доступа к хосту (стратегия S-01 APPROVED; детали DRAFT)
 
-**Предпочитаемый для проверки вариант — Docker Sandboxes (`sbx`), не обычный Docker-контейнер.** Согласно документации Docker, `sbx` использует отдельную microVM, где агент имеет `sudo`, может устанавливать инструменты и запускать внутренний Docker Engine. Изоляция хоста обеспечивается границей VM и настройкой того, какие ресурсы реально переданы внутрь. Не считать документированную поддержку доказательством совместимости с конкретным WORK-хостом: требуется Gate S0.
+**Согласованный для проверки вариант — Docker Sandboxes (`sbx`), не обычный Docker-контейнер.** Согласно документации Docker, `sbx` использует отдельную microVM, где агент имеет `sudo`, может устанавливать инструменты и запускать внутренний Docker Engine. Изоляция хоста обеспечивается границей VM и настройкой того, какие ресурсы реально переданы внутрь. Не считать документированную поддержку доказательством совместимости с конкретным WORK-хостом: требуется Gate S0.
 
 Предлагаемый простой execution profile:
 
@@ -54,7 +68,7 @@
 
 `sbx` сейчас поддерживает несколько coding agents (Codex, Cursor, Claude, Gemini, OpenCode и др.). Разные модели/effort выбираются **на уровне их адаптеров/профилей** и предварительно валидируются; не считать experimental `sbx --model` универсальным способом выставлять reasoning effort у всех агентов. Изменение агента/модели не увеличивает доступ к хосту и не меняет доверенную project policy.
 
-**Ссылки для проверки реализации:** [Docker Sandbox Security](https://docs.docker.com/ai/sandboxes/security/), [Clone mode](https://docs.docker.com/ai/sandboxes/security/isolation/), [Linux prerequisites](https://docs.docker.com/ai/sandboxes/install/), [Supported agents](https://docs.docker.com/ai/sandboxes/agents/). Для Linux local `sbx` требуется Ubuntu 24.04+ и работающий KVM, что нужно проверить на реальной машине. **Технический выбор A/B и deployment по-прежнему DRAFT.**
+**Ссылки для проверки реализации:** [Docker Sandbox Security](https://docs.docker.com/ai/sandboxes/security/), [Clone mode](https://docs.docker.com/ai/sandboxes/security/isolation/), [Linux prerequisites](https://docs.docker.com/ai/sandboxes/install/), [Supported agents](https://docs.docker.com/ai/sandboxes/agents/). Для Linux local `sbx` требуется Ubuntu 24.04+ и работающий KVM, что нужно проверить на реальной машине. **Выбор S-01 утверждён как первоочередной; фактический deployment остаётся DRAFT до Gate S0 PASS.**
 
 ## 5. Preflight-first: обязательный Gate S0 перед реализацией AgentRunner
 
@@ -87,4 +101,4 @@ Gate S0 должен выполняться до полноценного M2 Age
 - После успешного Review отозванное или истёкшее право на новое Coding не блокирует отдельно разрешённый Draft PR, если все актуальные publication guards проходят.
 - Crash/неопределённость не создают вторую попытку/PR, история сохраняется, изоляция по ADR-002/R-01.
 
-**Открыто на согласование:** выбрать модель A/B после Gate S0; точный deployment trust boundary для Kotlin Controller/Runner/Publisher и storage отдельных credentials; лимиты KVM/памяти для Android-сборок. Пока всё DRAFT.
+**Открыто на согласование:** результаты Gate S0 и конкретные ресурсы WORK; точная OS/VM boundary для Kotlin Controller/Runner/Publisher, хранение credentials, cleanup, сетевые правила, лимиты KVM/памяти для Android-сборок и fallback после несовместимости. **S-01 APPROVED, ADR-003 в целом DRAFT.**
