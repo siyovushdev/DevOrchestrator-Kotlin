@@ -292,7 +292,7 @@ class SqliteTaskStore(databasePath: Path) {
      * This storage primitive does NOT authenticate GitHub: caller must use GitHubIssueReader.
      * Never runs agents, sends GitHub writes or advances workflow phases.
      */
-    fun acceptGitHubIssue(issue: GitHubIssueRecord, proposedWorkflowId: String): IssueIntakeReceipt {
+    internal fun acceptGitHubIssue(issue: GitHubIssueRecord, proposedWorkflowId: String): IssueIntakeReceipt {
         require(proposedWorkflowId.isNotBlank() && proposedWorkflowId.length <= 128)
         return transaction { conn ->
             val allowed = conn.prepareStatement(
@@ -411,7 +411,7 @@ class SqliteTaskStore(databasePath: Path) {
 
     private fun bodySha256(body: String): String = MessageDigest.getInstance("SHA-256")
         .digest(body.toByteArray(StandardCharsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private fun holdNeedsOwnerInTransaction(
         conn: Connection, snapshot: WorkflowSnapshot, reason: String, now: String,
