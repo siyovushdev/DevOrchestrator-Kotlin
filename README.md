@@ -11,7 +11,7 @@ DevOrchestrator — собственная платформа управлени
 
 **Гибкие AI-агенты (PRD FR-13–FR-18, DRAFT):** Agent Catalog + Agent Profiles для Coding/Review/Planner/Chief; выбор Codex/Cursor/другого интегрированного агента, модели и reasoning effort вручную или автоматически по задаче. Менять профили можно без остановки сервиса, но новая конфигурация применяется только к следующему attempt. Автоселектор не выдаёт дополнительных прав. Первый E2E — Codex; второй адаптер и AUTO routing — M4.
 
-**Sandbox (ADR-003/S-01 APPROVED как стратегия):** выбран Docker Sandboxes microVM в clone mode с широкими правами внутри VM, без передачи хостовых файлов/ключей. **Практический runtime не проверен:** сначала Gate S0 на WORK. Остальная часть ADR-003 пока DRAFT.
+**Runtime первого MVP:** [ADR-003/S-04 — Native Codex CLI](docs/adr/ADR-003-MVP-native-cli-decision.md) — **APPROVED как стратегия**. Kotlin вызывает уже работающий `codex exec` в отдельной временной копии разрешённого PERSONAL тестового проекта. **Без Docker, microVM, нового Linux-пользователя и собственного sandbox engine.** Под текущим UID нет гарантии изоляции от читаемых файлов хоста; WORK/1МТ в таком профиле запрещён. Docker отложен, ADR-003 в целом DRAFT.
 
 ## Документы
 
