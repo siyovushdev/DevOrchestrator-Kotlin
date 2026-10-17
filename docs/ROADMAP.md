@@ -5,10 +5,10 @@
 | Этап | Содержание | Проверяемый результат / gate |
 |---|---|---|
 | **M0** | PRD, ADR-001..005, acceptance, backlog, угрозы/разрешения | Владелец утвердил документы и стартовый backlog; реализации нет |
-| **M1** | JVM/Ktor skeleton, SQLite, события/состояния, GitHub intake, registry | Реальная Issue принимается один раз; restart и неизвестный проект проверены |
-| **M2** | Codex Adapter, process lifecycle, sandbox, artifacts, deadlines | Система сама выполнила одну реальную Coding-задачу без ручного запуска Codex |
+| **M1** | JVM/Ktor skeleton, SQLite, GitHub intake, Project Registry + Agent Catalog/Profile schema | Реальная Issue принимается один раз; роли и agent profiles валидируются и сохраняются |
+| **M2** | Generic AgentRunner + первый Codex Adapter, Gate S0 для готового sandbox, artifacts | Система сама выполнила одну реальную Coding-задачу без ручного запуска; выбранный sandbox PASS |
 | **M3** | Independent Review, bounded corrections, Git Publisher, Draft PR | Настоящая Issue дошла до **Draft PR** через автоматическую цепочку; Merge нет |
-| **M4** | Persistent service, recovery, monitoring, backups, safety operations | Повторные задачи после restart идут без оператора; recovery не дублирует эффекты |
+| **M4** | Persistent service/recovery + второй реальный Agent Adapter и auto routing между разрешёнными ролями/моделями/effort | После restart задачи продолжаются; 2 адаптера и AUTO_RULES/AUTO_AI E2E без смены прав |
 | **M5** | Android Monitor (read-only) | Проекты, статусы, события, блокеры видны с телефона через защищённый API |
 | **M6** | Android Control | Авторизованные Owner approvals/pause, аудит и запрет обхода политики |
 
@@ -22,4 +22,4 @@
 
 ## Отложенные идеи
 
-Многомашинность через Firefly/WORK, GitHub App вместо начального транспорта, MCP-адаптер для ChatGPT, дополнительный AI Chief и расширенные AI-провайдеры — **не MVP**. Возвращаемся к ним только после M4 и отдельных ADR.
+Многомашинность через Firefly/WORK, GitHub App вместо начального транспорта, MCP-адаптер для ChatGPT и обязательный AI Chief — **не MVP**. **Подключаемый Agent Catalog и динамический выбор поддерживаемых агентов/моделей/effort — часть серверного MVP (M1–M4)**. Произвольные ещё не интегрированные провайдеры не обещаются.
