@@ -45,9 +45,14 @@ branch, push, open a PR, or merge.
   automation permission is granted by creating or queuing a workflow.
 - This code assumes a future **trusted** caller. The `pollOnce()` method is
   not exposed to HTTP, GitHub Issue text, agent tools, or a public command.
-- Read-only tests use deterministic fake GitHub transport. A real private
-  GitHub read **from Kotlin on WORK** has not been executed by this PR and is
-  `NOT_TESTED`; acceptance of the *live* criterion requires that smoke later.
+- Unit tests use deterministic fake GitHub transport. A separate, restricted
+  GitHub Actions job runs **real Kotlin authenticated GET** with ephemeral
+  `GITHUB_TOKEN` (read-only `contents` and `issues` permissions, owner's
+  same-repo PR only). It pins a real Issue into **temporary local SQLite**,
+  checks a second poll/restart, and asserts the JUnit test really executed.
+  It never runs Codex or writes to GitHub.
+- A live Kotlin read **on the WORK workstation** remains `NOT_TESTED`.
+  GitHub Actions success is not evidence that WORK's network or credentials work.
 
 ## Verification
 
