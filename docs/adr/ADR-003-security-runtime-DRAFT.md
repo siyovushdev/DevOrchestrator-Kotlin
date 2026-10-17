@@ -4,7 +4,7 @@
 > [Поправка S-04](ADR-003-MVP-native-cli-decision.md) **заменяет Docker Sandboxes microVM (S-01/S-02) как обязательный runtime первого MVP**. Используем установленный Codex CLI в обычном пользовательском сеансе, native sandbox и временную копию только личного тестового проекта. Никакой дополнительной Linux-учётной записи, Docker/microVM или VM Gate S0 на пути первой задачи. **Под одним UID нет гарантии недоступности хостовых файлов/credential stores**; WORK/1МТ в Native MVP не допускать. Docker/S-01/S-02/S-03 остаются историей и вариантом будущего усиленного профиля. ADR-003 в целом DRAFT до закрытия оставшихся решений.
 
 
-**Статус:** DRAFT — **S-04 APPROVED для Native MVP**; ранее утверждённые S-01/S-02 Docker перенесены за рамки первого MVP. Остальные детали безопасности не утверждены.  
+**Статус:** HISTORICAL / SUPERSEDED **для первого MVP**; авторитетный утверждённый документ — [ADR-003 Native PERSONAL MVP](ADR-003-native-personal-mvp.md). Docker S-01/S-02 оставлены только для возможного будущего усиленного runtime.  
 **Этап:** M0, [Issue #3](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/3).  
 **Основа:** ADR-001 и ADR-002 — APPROVED. **Не разрешает написание кода, создание runtime grants или запуск агентов.**
 
