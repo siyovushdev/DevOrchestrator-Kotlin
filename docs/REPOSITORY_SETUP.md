@@ -5,8 +5,8 @@
 ## Зафиксировано
 
 - Исходный README заменён индексом проекта и решениями.
-- [ADR-001](adr/ADR-001-project-registry.md) — единственное утверждённое архитектурное решение.
-- [PRD](PRD.md), [Architecture](ARCHITECTURE.md), [Roadmap](ROADMAP.md), [Backlog](BACKLOG.md) и [ADR-002](adr/ADR-002-lifecycle-DRAFT.md) — только DRAFT.
+- [ADR-001](adr/ADR-001-project-registry.md) и [ADR-002](adr/ADR-002-lifecycle-DRAFT.md) (R-01–R-06) — утверждённые архитектурные решения.
+- [PRD](PRD.md), [Architecture](ARCHITECTURE.md), [Roadmap](ROADMAP.md), [Backlog](BACKLOG.md) — DRAFT. ADR-003/004/005 — ещё не согласованы.
 - В GitHub открыты шесть M0 Issues для согласования проекта; M1–M6 не запускаются.
 - Добавлены шаблоны Issues и PR.
 
