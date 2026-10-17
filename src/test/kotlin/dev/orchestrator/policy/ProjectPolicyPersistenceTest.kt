@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -20,8 +21,9 @@ class ProjectPolicyPersistenceTest {
         val initial = assertNotNull(db.findPolicy(41))
         assertFalse(initial.personalAutoExecution)
         assertEquals(1L, initial.version)
-        assertTrue(db.updatePolicyFromTrustedOwner(initial.copy(personalAutoExecution = true), 1))
-        assertFalse(db.updatePolicyFromTrustedOwner(initial, 1))
+        assertTrue(db.updatePolicyFromTrustedOwner(initial.copy(personalAutoExecution = true, version = 2), 1))
+        assertFailsWith<IllegalArgumentException> { db.updatePolicyFromTrustedOwner(initial, 1) }
+        assertFalse(db.updatePolicyFromTrustedOwner(initial.copy(version = 2), 1))
         val next = assertNotNull(store().findPolicy(41))
         assertEquals(2L, next.version)
         assertTrue(next.personalAutoExecution)
@@ -34,7 +36,7 @@ class ProjectPolicyPersistenceTest {
         val work = assertNotNull(db.findPolicy(42))
         assertFalse(work.workOwnerExecutionApproved)
         assertFalse(work.workOwnerPublicationApproved)
-        assertTrue(db.updatePolicyFromTrustedOwner(work.copy(workOwnerExecutionApproved = true), 1))
+        assertTrue(db.updatePolicyFromTrustedOwner(work.copy(workOwnerExecutionApproved = true, version = 2), 1))
         val updated = assertNotNull(store().findPolicy(42))
         assertTrue(updated.workOwnerExecutionApproved)
         assertFalse(updated.workOwnerPublicationApproved)
