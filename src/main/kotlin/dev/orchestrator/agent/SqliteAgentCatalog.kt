@@ -221,9 +221,13 @@ class SqliteAgentCatalog(databasePath: Path) {
                 requireNotNull(projectKind(conn, repositoryId)))
 
             val current = readAssignment(conn, repositoryId, role)
+            // Even identical no-op requests must pass the expected binding revision.
+            if (current != null && expectedPreviousBindingVersion != current.assignmentVersion) {
+                return@writeTransaction null
+            }
             if (current != null && current.profileId == profileId &&
                 current.profileVersion == profileVersion) {
-                return@writeTransaction current // true no-op; no audit/write
+                return@writeTransaction current // true CAS-validated no-op
             }
             val nextVersion = if (current == null) {
                 if (expectedPreviousBindingVersion != null) return@writeTransaction null
