@@ -1,6 +1,6 @@
 # Архитектура DevOrchestrator v0.1
 
-**Статус:** DRAFT. Концепция для обсуждения, не действующее решение о реализации.
+**Статус:** APPROVED как архитектурная база M1–M4 (Native PERSONAL test MVP, 2026-10-17). Реальный код и E2E проверяются отдельно.
 
 ## 1. Главные принципы
 
@@ -54,7 +54,7 @@ ChatGPT / GitHub Issue      Android (M5–M6, позднее)
 | Publisher | Branch, commit, push, Draft PR, durable receipts | Merge или повторять неопределённый эффект вслепую |
 | ApiServer | Read/control endpoints для владельца | Прямой root shell |
 
-## 3A. Подключаемые агенты и маршрутизация задач (DRAFT)
+## 3A. Подключаемые агенты и маршрутизация задач (утверждённое требование, реализуется по этапам)
 
 ```text
        GitHub Issue + Project Registry
@@ -92,7 +92,7 @@ ChatGPT / GitHub Issue      Android (M5–M6, позднее)
 
 ## 4. Состояния
 
-**Утверждено ADR-002/R-06:** фаза workflow, состояние попытки и состояние внешнего эффекта — раздельные машины; `NEEDS_OWNER` — отдельный hold. Например, `REVIEWING` — фаза, а `UNKNOWN` — состояние конкретного attempt. [ADR-002](adr/ADR-002-lifecycle-DRAFT.md) и [таблица R-06](adr/ADR-002-R06-state-machine-DRAFT.md) имеют статус APPROVED; вся ARCHITECTURE.md пока DRAFT.
+**Утверждено ADR-002/R-06:** фаза workflow, состояние попытки и состояние внешнего эффекта — раздельные машины; `NEEDS_OWNER` — отдельный hold. Например, `REVIEWING` — фаза, а `UNKNOWN` — состояние конкретного attempt. [ADR-002](adr/ADR-002-lifecycle-DRAFT.md) и [таблица R-06](adr/ADR-002-R06-state-machine-DRAFT.md) имеют статус APPROVED; архитектура M1 утверждена.
 
 ## 5. Данные
 
@@ -110,7 +110,7 @@ ChatGPT / GitHub Issue      Android (M5–M6, позднее)
 
 Draft PR — **целевой результат автоматизации**. Его создание допускается после PASS необходимого Review и проверки exact tree/branch/base. Ответ GitHub перед объявлением SUCCESS надо проверить повторным read; невозможность подтвердить outcome должна вести в `NEEDS_OWNER` без повторного создания PR.
 
-По утверждённому ADR-002/R-04 в PERSONAL Draft PR создаётся после обязательного независимого Review PASS без предварительного Chief по умолчанию. Merge — только Owner. WORK использует отдельные строгие Owner gates. Полный архитектурный документ пока DRAFT.
+По утверждённому ADR-002/R-04 в PERSONAL Draft PR создаётся после обязательного независимого Review PASS без предварительного Chief по умолчанию. Merge — только Owner. WORK использует отдельные строгие Owner gates. Архитектура утверждена в рамках MVP.
 
 ## 7. Android (будущие этапы)
 
