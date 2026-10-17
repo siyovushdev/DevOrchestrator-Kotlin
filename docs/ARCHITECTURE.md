@@ -8,6 +8,7 @@
 - Один основной сервис, один писатель authoritative workflow state, SQLite — источник истины, GitHub — внешний источник задач и PR.
 - Проектная политика проверяется на границе каждого действия, а не только при обнаружении Issue.
 - Coding и Review не могут публиковать GitHub PR своими credentials.
+- **Нет жёстко заданного Codex/модели/effort для роли:** WorkflowEngine вызывает Agent Adapter по выбранному Agent Profile. Выбор профиля сам по себе не расширяет права.
 - Не путать *одну кодовую базу оркестратора* с *временными изолированными рабочими копиями целевых репозиториев*.
 
 ## 2. Предложенная схема
@@ -46,10 +47,48 @@ ChatGPT / GitHub Issue      Android (M5–M6, позднее)
 | GitHubGateway | Чтение Issues и проверка PR/refs, scoped writes | Менять durable state без двигателя |
 | WorkflowEngine | Решения и переходы фаз, лимиты, очередь | Выполнять shell/HTTP side effects напрямую |
 | TaskStore | SQLite transactions, attempts, events, outbox | Подменять успешными неизвестные эффекты |
-| AgentRunner | Запуск/stop/observation bounded процессов | Иметь токены публикации |
+| AgentCatalog | Каталог проверенных адаптеров, capabilities, поддержанных моделей/effort и доступности | Принимать произвольные опасные настройки из текста Issue |
+| AgentSelector | MANUAL / AUTO_RULES / AUTO_AI выбор среди разрешённых Project Registry профилей, с audit | Повышать rights или менять WORK approval policy |
+| AgentRunner | Запуск/stop/observation bounded процессов через выбранный адаптер и sandbox | Иметь токены публикации или незаметно менять текущий attempt |
 | ReviewDriver | Независимая проверка frozen tree/diff | Доверять саморевью агента |
 | Publisher | Branch, commit, push, Draft PR, durable receipts | Merge или повторять неопределённый эффект вслепую |
 | ApiServer | Read/control endpoints для владельца | Прямой root shell |
+
+## 3A. Подключаемые агенты и маршрутизация задач (DRAFT)
+
+```text
+       GitHub Issue + Project Registry
+                       |
+                 Policy Filter
+                       |
+            AgentSelector / Planner
+         MANUAL | AUTO_RULES | AUTO_AI
+                       |
+              Agent Profile Snapshot
+       adapter + role + model + effort
+       runtime + capabilities + limits
+                       |
+               Sandbox Adapter
+                       |
+          Agent Adapter (Codex / ...)
+             /             \
+         Coding         Independent Review
+             \             /
+                Verified Evidence
+                       |
+              Trusted Publisher
+              (Draft PR only)
+```
+
+- **Один контракт AgentAdapter** для реальных Codex/Cursor/Claude/Gemini/Kimi/OpenCode (только после отдельной интеграции); адаптер запускает, собирает evidence, останавливает/наблюдает процесс и объявляет совместимые модели/effort.
+- **Роль — назначение, не тип бинарного файла:** Coding/Review/Planner/Chief (Chief опционален). Для каждого проекта можно менять профили без изменения core.
+- **Роутинг:** ручной выбор или автоматический на основе сложности, инструментов, доступности, лимитов, стоимости/качества. AI Selector **выбирает, но не выдаёт права**. Если подходящего агента нет — BLOCKED без запуска.
+- **Динамика безопасна между attempts:** конфигурация версионируется и фиксируется при старте attempt; изменённый Owner профайл применяется к следующей попытке. Во время RUNNING модификация процесса/модели запрещена.
+- **Верификация:** reviewer — новая независимая сессия и frozen tree; если модель/провайдер совпадают, независимость контекста всё равно обязательна, проектная policy может требовать другого провайдера.
+- **Sandbox — отдельная граница:** по ADR-003 кандидатом является Docker Sandboxes microVM c изолированной приватной копией проекта (`--clone`) и широкими правами **внутри** неё. Другой runtime допустим после реального Gate S0. Не давать agent access к host Docker socket, host SSH agent, secrets и host-side MCP execution.
+- **Никакого авто-Merge:** публикация проходит через отдельный процесс с собственными авторизованными credentials и git/github guards (ADR-004).
+
+**Этапы:** M1 — схема Agent Catalog и профилей; M2 — Codex + sandbox; M3 — Review/Draft PR; M4 — второй реальный адаптер и проверенный AUTO selection. Приоритет — сначала один настоящий рабочий E2E, потом переключение агентов. Точный интерфейс — ADR-005.
 
 ## 4. Состояния
 
@@ -79,4 +118,4 @@ Kotlin/Compose клиент Ktor API: список проектов/задач, 
 
 ## 8. Что намеренно не проектируем сейчас
 
-Много машин, динамическое переключение LLM в ходе задачи, Kubernetes, глобальный транзакционный протокол между Git и GitHub, генерацию собственных sandbox-движков. Для MVP нужны минимальные существующие системные средства и измеримые инварианты.
+Много машин, переключение модели **внутри выполняющегося agent attempt**, Kubernetes, глобальный транзакционный протокол между Git и GitHub, генерацию собственных sandbox-движков. **Между attempts** смена агента/модели/effort и автоматическая маршрутизация входят в план серверного MVP. Для MVP нужны минимальные существующие системные средства и измеримые инварианты.
