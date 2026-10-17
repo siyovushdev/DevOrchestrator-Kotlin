@@ -29,13 +29,14 @@ class SqliteTaskStoreTest {
                 kind = ProjectKind.PERSONAL,
                 workspaceRoot = directory.toString(),
             ),
+            ownerActorId = "owner:test",
         )
     }
 
     @Test
     fun migrationsAreIdempotentAndPreserveDataOnRestart() {
         val first = createStore()
-        assertEquals(1, first.schemaVersion())
+        assertEquals(2, first.schemaVersion())
         register(first)
 
         val created = first.enqueue(411, 21, "workflow-1")
@@ -44,7 +45,7 @@ class SqliteTaskStoreTest {
         assertEquals(0L, created.version)
 
         val reopened = createStore()
-        assertEquals(1, reopened.schemaVersion())
+        assertEquals(2, reopened.schemaVersion())
         assertEquals(created, reopened.findWorkflow(411, 21))
         assertEquals(listOf("WORKFLOW_QUEUED"), reopened.listEvents(created.id).map { it.type })
     }
@@ -191,6 +192,7 @@ class SqliteTaskStoreTest {
         assertFailsWith<SQLException> {
             store.insertProject(
                 RegisteredProject("other-name", 411, ProjectKind.WORK, directory.toString()),
+                ownerActorId = "owner:test",
             )
         }
         assertNotNull(store.enqueue(411, 1, "one-workflow"))
