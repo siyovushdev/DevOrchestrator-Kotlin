@@ -11,7 +11,7 @@ DevOrchestrator — собственная платформа управлени
 
 **Гибкие AI-агенты (PRD FR-13–FR-18, DRAFT):** Agent Catalog + Agent Profiles для Coding/Review/Planner/Chief; выбор Codex/Cursor/другого интегрированного агента, модели и reasoning effort вручную или автоматически по задаче. Менять профили можно без остановки сервиса, но новая конфигурация применяется только к следующему attempt. Автоселектор не выдаёт дополнительных прав. Первый E2E — Codex; второй адаптер и AUTO routing — M4.
 
-**Sandbox (ADR-003, DRAFT):** проверить Docker Sandboxes microVM в clone mode с широкими правами внутри VM, без передачи хостовых файлов/ключей; выбрать реальный runtime только после Gate S0.
+**Sandbox (ADR-003/S-01 APPROVED как стратегия):** выбран Docker Sandboxes microVM в clone mode с широкими правами внутри VM, без передачи хостовых файлов/ключей. **Практический runtime не проверен:** сначала Gate S0 на WORK. Остальная часть ADR-003 пока DRAFT.
 
 ## Документы
 
