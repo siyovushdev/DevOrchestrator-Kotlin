@@ -6,6 +6,8 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.ResultSet
 import java.time.Instant
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import dev.orchestrator.policy.ProjectPolicy
 
 /**
@@ -284,6 +286,162 @@ class SqliteTaskStore(databasePath: Path) {
         }
     }
 
+    /**
+     * Atomic trusted-GitHub intake: authorization, durable QUEUED workflow, pinned immutable
+     * issue body/version + pinned base SHA and event happen in ONE SQLite transaction.
+     * This storage primitive does NOT authenticate GitHub: caller must use GitHubIssueReader.
+     * Never runs agents, sends GitHub writes or advances workflow phases.
+     */
+    internal fun acceptGitHubIssue(issue: GitHubIssueRecord, proposedWorkflowId: String): IssueIntakeReceipt {
+        require(proposedWorkflowId.isNotBlank() && proposedWorkflowId.length <= 128)
+        return transaction { conn ->
+            val allowed = conn.prepareStatement(
+                """
+                SELECT p.kind, pp.personal_auto_execution FROM projects p
+                JOIN project_policies pp ON p.repository_id = pp.repository_id
+                WHERE p.repository_id = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setLong(1, issue.repositoryId)
+                statement.executeQuery().use { result ->
+                    result.next() && result.getString("kind") == "PERSONAL" &&
+                        result.getInt("personal_auto_execution") == 1
+                }
+            }
+            // Repeat policy check INSIDE same transaction after network read, not just preflight.
+            check(allowed) { "GitHub intake denied: unknown, WORK or disabled project" }
+
+            val current = readWorkflow(conn, issue.repositoryId, issue.issueNumber)
+            if (!issue.open && current == null) {
+                return@transaction IssueIntakeReceipt(IssueIntakeOutcome.IGNORED_CLOSED, null)
+            }
+            val now = Instant.now().toString()
+            if (current == null) {
+                check(issue.open)
+                conn.prepareStatement(
+                    """
+                    INSERT INTO workflows(
+                        workflow_id, repository_id, issue_number, phase, hold,
+                        version, corrections_used, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'QUEUED', 'NONE', 0, 0, ?, ?)
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setString(1, proposedWorkflowId)
+                    statement.setLong(2, issue.repositoryId)
+                    statement.setInt(3, issue.issueNumber)
+                    statement.setString(4, now)
+                    statement.setString(5, now)
+                    check(statement.executeUpdate() == 1)
+                }
+                val bodyHash = bodySha256(issue.body)
+                conn.prepareStatement(
+                    """
+                    INSERT INTO github_issue_snapshots(
+                        workflow_id, repository_id, issue_number, github_issue_id,
+                        source_updated_at, issue_title, issue_body, issue_body_sha256,
+                        base_sha, pinned_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setString(1, proposedWorkflowId)
+                    statement.setLong(2, issue.repositoryId)
+                    statement.setInt(3, issue.issueNumber)
+                    statement.setLong(4, issue.githubIssueId)
+                    statement.setString(5, issue.sourceUpdatedAt.toString())
+                    statement.setString(6, issue.title)
+                    statement.setString(7, issue.body)
+                    statement.setString(8, bodyHash)
+                    statement.setString(9, issue.baseSha.lowercase())
+                    statement.setString(10, now)
+                    check(statement.executeUpdate() == 1)
+                }
+                insertEvent(conn, proposedWorkflowId, "WORKFLOW_QUEUED", null, now)
+                insertEvent(conn, proposedWorkflowId, "GITHUB_ISSUE_PINNED", null, now)
+                return@transaction IssueIntakeReceipt(IssueIntakeOutcome.CREATED, proposedWorkflowId)
+            }
+
+            // A previously established owner hold is the durable truth. Never claim DUPLICATE
+            // or replace its original blocker when a later poll sees a different source.
+            if (current.hold == WorkflowHold.NEEDS_OWNER) {
+                return@transaction IssueIntakeReceipt(
+                    IssueIntakeOutcome.NEEDS_OWNER, current.id, current.holdReason,
+                )
+            }
+            val pinned = readPinnedIssue(conn, issue.repositoryId, issue.issueNumber)
+            val changed = !issue.open || pinned == null ||
+                pinned.githubIssueId != issue.githubIssueId ||
+                pinned.sourceUpdatedAt != issue.sourceUpdatedAt.toString() ||
+                pinned.title != issue.title || pinned.body != issue.body
+            if (changed) {
+                val reason = if (!issue.open) "GITHUB_ISSUE_CLOSED"
+                    else if (pinned == null) "GITHUB_PINNED_SNAPSHOT_MISSING"
+                    else "GITHUB_ISSUE_CHANGED"
+                val held = holdNeedsOwnerInTransaction(conn, current, reason, now)
+                return@transaction IssueIntakeReceipt(
+                    if (held || current.hold == WorkflowHold.NEEDS_OWNER)
+                        IssueIntakeOutcome.NEEDS_OWNER else IssueIntakeOutcome.TERMINAL_UNCHANGED,
+                    current.id, reason,
+                )
+            }
+            IssueIntakeReceipt(IssueIntakeOutcome.DUPLICATE, current.id)
+        }
+    }
+
+    fun findPinnedGitHubIssue(repositoryId: Long, issueNumber: Int): PinnedGitHubIssue? =
+        connection().use { conn -> readPinnedIssue(conn, repositoryId, issueNumber) }
+
+    private fun readPinnedIssue(
+        conn: Connection, repositoryId: Long, issueNumber: Int,
+    ): PinnedGitHubIssue? = conn.prepareStatement(
+        """
+        SELECT workflow_id, repository_id, issue_number, github_issue_id,
+               source_updated_at, issue_title, issue_body, issue_body_sha256, base_sha
+        FROM github_issue_snapshots WHERE repository_id = ? AND issue_number = ?
+        """.trimIndent(),
+    ).use { statement ->
+        statement.setLong(1, repositoryId)
+        statement.setInt(2, issueNumber)
+        statement.executeQuery().use { result ->
+            if (!result.next()) null else PinnedGitHubIssue(
+                workflowId = result.getString("workflow_id"),
+                repositoryId = result.getLong("repository_id"),
+                issueNumber = result.getInt("issue_number"),
+                githubIssueId = result.getLong("github_issue_id"),
+                sourceUpdatedAt = result.getString("source_updated_at"),
+                title = result.getString("issue_title"),
+                body = result.getString("issue_body"),
+                bodySha256 = result.getString("issue_body_sha256"),
+                baseSha = result.getString("base_sha"),
+            )
+        }
+    }
+
+    private fun bodySha256(body: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(body.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private fun holdNeedsOwnerInTransaction(
+        conn: Connection, snapshot: WorkflowSnapshot, reason: String, now: String,
+    ): Boolean {
+        val held = conn.prepareStatement(
+            """
+            UPDATE workflows
+            SET hold = 'NEEDS_OWNER', hold_reason = ?, version = version + 1,
+                updated_at = ?
+            WHERE workflow_id = ? AND version = ? AND hold != 'NEEDS_OWNER'
+              AND phase NOT IN ('DRAFT_PR_CREATED', 'FAILED', 'CANCELLED')
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, reason)
+            statement.setString(2, now)
+            statement.setString(3, snapshot.id)
+            statement.setLong(4, snapshot.version)
+            statement.executeUpdate() == 1
+        }
+        if (held) insertEvent(conn, snapshot.id, "NEEDS_OWNER", reason, now)
+        return held
+    }
+
     fun findWorkflow(repositoryId: Long, issueNumber: Int): WorkflowSnapshot? =
         connection().use { conn -> readWorkflow(conn, repositoryId, issueNumber) }
 
@@ -467,12 +625,36 @@ class SqliteTaskStore(databasePath: Path) {
                     SCHEMA_V2.forEach { sql -> db.createStatement().use { it.execute(sql) } }
                     db.createStatement().use { it.execute("PRAGMA user_version = 2") }
                 }
+                if (currentVersion < 3) {
+                    SCHEMA_V3.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 3") }
+                }
             }
         }
     }
 
     private companion object {
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
+
+        val SCHEMA_V3 = listOf(
+            """
+            CREATE TABLE github_issue_snapshots(
+                workflow_id TEXT PRIMARY KEY NOT NULL REFERENCES workflows(workflow_id),
+                repository_id INTEGER NOT NULL,
+                issue_number INTEGER NOT NULL,
+                github_issue_id INTEGER NOT NULL UNIQUE CHECK(github_issue_id > 0),
+                source_updated_at TEXT NOT NULL,
+                issue_title TEXT NOT NULL,
+                issue_body TEXT NOT NULL,
+                issue_body_sha256 TEXT NOT NULL,
+                base_sha TEXT NOT NULL,
+                pinned_at TEXT NOT NULL,
+                UNIQUE(repository_id, issue_number),
+                FOREIGN KEY(repository_id, issue_number)
+                    REFERENCES workflows(repository_id, issue_number)
+            )
+            """.trimIndent(),
+        )
 
         val SCHEMA_V2 = listOf(
             """
