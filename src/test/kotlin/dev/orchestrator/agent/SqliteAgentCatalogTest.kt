@@ -191,7 +191,8 @@ class SqliteAgentCatalogTest {
         assertFalse(db.saveProfile(p.copy(version = 2), 1, actor))
         assertNull(db.findProfile(p.profileId, 2))
         assertNotNull(db.bindRole(101, AgentRole.CODING, p.profileId, 1, null, actor))
-        assertNotNull(db.bindRole(101, AgentRole.CODING, p.profileId, 1, 999, actor))
+        assertNull(db.bindRole(101, AgentRole.CODING, p.profileId, 1, 999, actor))
+        assertNotNull(db.bindRole(101, AgentRole.CODING, p.profileId, 1, 1, actor))
         assertEquals(1L, assertNotNull(db.findAssignedProfile(
             101, AgentRole.CODING)).assignment.assignmentVersion)
         assertEquals(3, db.listConfigAudit().size)
