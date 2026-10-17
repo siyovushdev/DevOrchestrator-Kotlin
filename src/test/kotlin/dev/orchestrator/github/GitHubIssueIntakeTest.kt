@@ -232,6 +232,48 @@ class GitHubIssueIntakeTest {
         assertNull(store.findWorkflow(411,7))
     }
 
+    @Test fun legacyWorkflowWithoutFrozenIssueIsBlockedNotSilentlyAdopted() {
+        val store = db()
+        allowPersonal(store)
+        val legacy = store.enqueue(411, 7, "legacy-unpinned")
+        assertNull(store.findPinnedGitHubIssue(411,7))
+        val imported = GitHubIssueIntake(store, reader(listOf(listOf(issue())))).pollOnce(target)
+        assertEquals(1, imported.needsOwner)
+        assertEquals("GITHUB_PINNED_SNAPSHOT_MISSING",
+            assertNotNull(store.findWorkflow(411,7)).holdReason)
+        assertNull(store.findPinnedGitHubIssue(411,7))
+        assertEquals("legacy-unpinned", legacy.id)
+        assertEquals(2, store.listEvents(legacy.id).size)
+    }
+
+    @Test fun disabledPersonalAndUnknownReposDenyBeforeGitHubRead() {
+        val store = db()
+        store.insertProject(RegisteredProject(
+            "disabled-personal", 411, ProjectKind.PERSONAL, directory.toString()
+        ), ownerActorId = "owner:test")
+        val noNetwork = GitHubIssueReader(GitHubJsonRead {
+            error("Denied projects must never reach GitHub")
+        })
+        assertFailsWith<IllegalStateException> {
+            GitHubIssueIntake(store, noNetwork).pollOnce(target)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GitHubIssueIntake(store, noNetwork)
+                .pollOnce(GitHubRepositoryTarget("owner","other",999L))
+        }
+        assertNull(store.findWorkflow(411,7))
+    }
+
+    @Test fun malformedGitHubResponseCannotBeCountedAsSuccess() {
+        val store = db()
+        allowPersonal(store)
+        val badJson = GitHubIssueReader(GitHubJsonRead { "not-json" })
+        assertFailsWith<Exception> {
+            GitHubIssueIntake(store, badJson).pollOnce(target)
+        }
+        assertNull(store.findWorkflow(411,7))
+    }
+
     @Test fun sixConcurrentPollersCreateOnePinnedRecord() {
         val store = db()
         allowPersonal(store)
