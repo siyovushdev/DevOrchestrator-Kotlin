@@ -16,6 +16,16 @@ import dev.orchestrator.policy.ProjectPolicy
  * A new JDBC connection is opened per operation. SQLite WAL + transactions + UNIQUE constraints
  * protect the data if an Issue is polled again or the service is restarted.
  */
+data class ProjectPolicyAudit(
+    val version: Long,
+    val eventKind: String,
+    val actorId: String,
+    val reason: String,
+    val beforePersonalAuto: Boolean?,
+    val afterPersonalAuto: Boolean,
+    val recordedAt: String,
+)
+
 class SqliteTaskStore(databasePath: Path) {
     private val file: Path = databasePath.toAbsolutePath().normalize()
 
@@ -37,12 +47,15 @@ class SqliteTaskStore(databasePath: Path) {
      * Storage primitive for a trusted owner-controlled registry (M1-03).
      * Not exposed through HTTP or agent tools. It does not authorize any agent execution.
      */
-    fun insertProject(project: RegisteredProject) {
+    fun insertProject(project: RegisteredProject, ownerActorId: String) {
+        validateOwnerActor(ownerActorId)
         require(project.id.isNotBlank())
         require(project.repositoryId > 0)
         require(project.workspaceRoot.isNotBlank())
         val root = Path.of(project.workspaceRoot)
-        require(root.isAbsolute && root.normalize() == root) { "Project root must be absolute and normalized" }
+        require(root.isAbsolute && root.normalize() == root && root.parent != null) {
+            "Project root must be absolute, normalized and not filesystem root"
+        }
 
         transaction { conn ->
             conn.prepareStatement(
@@ -61,6 +74,8 @@ class SqliteTaskStore(databasePath: Path) {
                 it.setLong(1, project.repositoryId)
                 check(it.executeUpdate() == 1)
             }
+            auditPolicy(conn, project.repositoryId, 1, "REGISTERED", ownerActorId,
+                "Project registered with default DENY", null, false)
         }
     }
 
@@ -69,8 +84,7 @@ class SqliteTaskStore(databasePath: Path) {
         conn.prepareStatement(
             """
             SELECT p.project_id, p.repository_id, p.kind, p.workspace_root,
-                   p.policy_version, pp.personal_auto_execution,
-                   pp.work_owner_execution_approved, pp.work_owner_publication_approved
+                   p.policy_version, pp.personal_auto_execution
             FROM projects p JOIN project_policies pp ON pp.repository_id = p.repository_id
             WHERE p.repository_id = ?
             """.trimIndent(),
@@ -83,8 +97,6 @@ class SqliteTaskStore(databasePath: Path) {
                     kind = ProjectKind.valueOf(result.getString("kind")),
                     workspaceRoot = Path.of(result.getString("workspace_root")),
                     personalAutoExecution = result.getInt("personal_auto_execution") == 1,
-                    workOwnerExecutionApproved = result.getInt("work_owner_execution_approved") == 1,
-                    workOwnerPublicationApproved = result.getInt("work_owner_publication_approved") == 1,
                     version = result.getLong("policy_version"),
                 )
             }
@@ -92,14 +104,44 @@ class SqliteTaskStore(databasePath: Path) {
     }
 
     /**
-     * Trusted-owner boundary only: not wired to HTTP, Issue or agents.
-     * Compare-and-swap preserves version and audit under concurrent owner updates.
+     * Trusted-owner storage primitive, NOT authentication. Only an authenticated controller
+     * may supply ownerActorId. No HTTP, Issue or agent integration exists at this stage.
+     * Changes use BEGIN IMMEDIATE + CAS, full audit, and no-op requests do not write.
      */
-    fun updatePolicyFromTrustedOwner(policy: ProjectPolicy, expectedVersion: Long): Boolean {
+    fun updatePolicyFromTrustedOwner(
+        policy: ProjectPolicy,
+        expectedVersion: Long,
+        ownerActorId: String,
+        reason: String,
+    ): Boolean {
+        validateOwnerActor(ownerActorId)
+        require(reason.isNotBlank() && reason.length <= 500 && reason.none { it.isISOControl() })
         require(expectedVersion > 0 && expectedVersion < Long.MAX_VALUE)
-        require(policy.version == expectedVersion + 1) { "Policy snapshot version must be next CAS version" }
+        require(policy.version == expectedVersion + 1) {
+            "Policy snapshot version must be next CAS version"
+        }
         return transaction { conn ->
-            val updated = conn.prepareStatement(
+            val before = conn.prepareStatement(
+                """
+                SELECT pp.personal_auto_execution
+                FROM projects p JOIN project_policies pp ON pp.repository_id = p.repository_id
+                WHERE p.repository_id = ? AND p.project_id = ? AND p.kind = ?
+                  AND p.workspace_root = ? AND p.policy_version = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setLong(1, policy.repositoryId)
+                statement.setString(2, policy.projectId)
+                statement.setString(3, policy.kind.name)
+                statement.setString(4, policy.workspaceRoot.toString())
+                statement.setLong(5, expectedVersion)
+                statement.executeQuery().use { result ->
+                    if (result.next()) result.getInt(1) == 1 else null
+                }
+            }
+            if (before == null || before == policy.personalAutoExecution) {
+                return@transaction false
+            }
+            val changed = conn.prepareStatement(
                 """
                 UPDATE projects SET policy_version = policy_version + 1
                 WHERE repository_id = ? AND project_id = ? AND kind = ?
@@ -113,34 +155,76 @@ class SqliteTaskStore(databasePath: Path) {
                 statement.setLong(5, expectedVersion)
                 statement.executeUpdate() == 1
             }
-            if (updated) {
-                conn.prepareStatement(
-                    """
-                    UPDATE project_policies SET personal_auto_execution = ?,
-                        work_owner_execution_approved = ?,
-                        work_owner_publication_approved = ?
-                    WHERE repository_id = ?
-                    """.trimIndent(),
-                ).use { statement ->
-                    statement.setInt(1, if (policy.personalAutoExecution) 1 else 0)
-                    statement.setInt(2, if (policy.workOwnerExecutionApproved) 1 else 0)
-                    statement.setInt(3, if (policy.workOwnerPublicationApproved) 1 else 0)
-                    statement.setLong(4, policy.repositoryId)
-                    check(statement.executeUpdate() == 1)
-                }
-                conn.prepareStatement(
-                    """
-                    INSERT INTO project_policy_events(repository_id, policy_version, recorded_at)
-                    VALUES (?, ?, ?)
-                    """.trimIndent(),
-                ).use { statement ->
-                    statement.setLong(1, policy.repositoryId)
-                    statement.setLong(2, expectedVersion + 1)
-                    statement.setString(3, Instant.now().toString())
-                    check(statement.executeUpdate() == 1)
+            check(changed) { "Policy changed during serialized transaction" }
+            conn.prepareStatement(
+                "UPDATE project_policies SET personal_auto_execution = ? WHERE repository_id = ?",
+            ).use { statement ->
+                statement.setInt(1, if (policy.personalAutoExecution) 1 else 0)
+                statement.setLong(2, policy.repositoryId)
+                check(statement.executeUpdate() == 1)
+            }
+            auditPolicy(conn, policy.repositoryId, expectedVersion + 1, "UPDATED",
+                ownerActorId, reason, before, policy.personalAutoExecution)
+            true
+        }
+    }
+
+    private fun validateOwnerActor(ownerActorId: String) {
+        require(ownerActorId.isNotBlank() && ownerActorId.length <= 128 &&
+            ownerActorId.none { it.isISOControl() }) { "Missing/invalid authenticated owner ID" }
+    }
+
+    private fun auditPolicy(
+        conn: Connection, repositoryId: Long, version: Long, kind: String,
+        actorId: String, reason: String, before: Boolean?, after: Boolean,
+    ) {
+        conn.prepareStatement(
+            """
+            INSERT INTO project_policy_events(
+                repository_id, policy_version, event_kind, actor_id, reason,
+                old_personal_auto_execution, new_personal_auto_execution, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setLong(1, repositoryId)
+            statement.setLong(2, version)
+            statement.setString(3, kind)
+            statement.setString(4, actorId)
+            statement.setString(5, reason)
+            if (before == null) statement.setNull(6, java.sql.Types.INTEGER)
+            else statement.setInt(6, if (before) 1 else 0)
+            statement.setInt(7, if (after) 1 else 0)
+            statement.setString(8, Instant.now().toString())
+            check(statement.executeUpdate() == 1)
+        }
+    }
+
+    fun policyHistory(repositoryId: Long): List<ProjectPolicyAudit> = connection().use { conn ->
+        conn.prepareStatement(
+            """
+            SELECT policy_version, event_kind, actor_id, reason,
+                   old_personal_auto_execution, new_personal_auto_execution, recorded_at
+            FROM project_policy_events WHERE repository_id = ? ORDER BY policy_version
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setLong(1, repositoryId)
+            statement.executeQuery().use { result ->
+                buildList {
+                    while (result.next()) {
+                        val oldValue = result.getInt("old_personal_auto_execution")
+                        val before = if (result.wasNull()) null else oldValue == 1
+                        add(ProjectPolicyAudit(
+                            version = result.getLong("policy_version"),
+                            eventKind = result.getString("event_kind"),
+                            actorId = result.getString("actor_id"),
+                            reason = result.getString("reason"),
+                            beforePersonalAuto = before,
+                            afterPersonalAuto = result.getInt("new_personal_auto_execution") == 1,
+                            recordedAt = result.getString("recorded_at"),
+                        ))
+                    }
                 }
             }
-            updated
         }
     }
 
@@ -394,9 +478,8 @@ class SqliteTaskStore(databasePath: Path) {
             """
             CREATE TABLE project_policies(
                 repository_id INTEGER PRIMARY KEY REFERENCES projects(repository_id),
-                personal_auto_execution INTEGER NOT NULL DEFAULT 0 CHECK(personal_auto_execution IN (0,1)),
-                work_owner_execution_approved INTEGER NOT NULL DEFAULT 0 CHECK(work_owner_execution_approved IN (0,1)),
-                work_owner_publication_approved INTEGER NOT NULL DEFAULT 0 CHECK(work_owner_publication_approved IN (0,1))
+                personal_auto_execution INTEGER NOT NULL DEFAULT 0
+                    CHECK(personal_auto_execution IN (0,1))
             )
             """.trimIndent(),
             """
@@ -404,6 +487,13 @@ class SqliteTaskStore(databasePath: Path) {
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 repository_id INTEGER NOT NULL REFERENCES projects(repository_id),
                 policy_version INTEGER NOT NULL CHECK(policy_version > 0),
+                event_kind TEXT NOT NULL CHECK(event_kind IN ('REGISTERED', 'MIGRATED', 'UPDATED')),
+                actor_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                old_personal_auto_execution INTEGER
+                    CHECK(old_personal_auto_execution IS NULL OR old_personal_auto_execution IN (0,1)),
+                new_personal_auto_execution INTEGER NOT NULL
+                    CHECK(new_personal_auto_execution IN (0,1)),
                 recorded_at TEXT NOT NULL,
                 UNIQUE(repository_id, policy_version)
             )
@@ -411,6 +501,15 @@ class SqliteTaskStore(databasePath: Path) {
             """
             INSERT INTO project_policies(repository_id)
             SELECT repository_id FROM projects
+            """.trimIndent(),
+            """
+            INSERT INTO project_policy_events(
+                repository_id, policy_version, event_kind, actor_id, reason,
+                old_personal_auto_execution, new_personal_auto_execution, recorded_at
+            )
+            SELECT repository_id, policy_version, 'MIGRATED', 'system:migration',
+                   'Schema v1 to v2: default DENY', NULL, 0,
+                   STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') FROM projects
             """.trimIndent(),
         )
 
