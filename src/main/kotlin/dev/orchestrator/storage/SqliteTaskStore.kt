@@ -229,46 +229,57 @@ class SqliteTaskStore(databasePath: Path) {
         }
     }
 
-    private fun <T> transaction(block: (Connection) -> T): T = connection().use { conn ->
-        conn.autoCommit = false
+    private fun <T> transaction(block: (Connection) -> T): T =
+        connection().use { conn -> transaction(conn, block) }
+
+    /**
+     * SQLite's default BEGIN DEFERRED allows a read before a write lock. Two concurrent
+     * pollers may both read the registry, then one fails with SQLITE_BUSY_SNAPSHOT while
+     * trying to insert. Acquire the writer reservation BEFORE the first read instead.
+     *
+     * Execute BEGIN/COMMIT through SQL: JDBC autoCommit remains true, so conn.commit()
+     * must not be used with this explicit SQLite transaction.
+     */
+    private fun <T> transaction(conn: Connection, block: (Connection) -> T): T {
+        conn.createStatement().use { it.execute("BEGIN IMMEDIATE") }
         try {
             val result = block(conn)
-            conn.commit()
-            result
+            conn.createStatement().use { it.execute("COMMIT") }
+            return result
         } catch (failure: Throwable) {
-            conn.rollback()
+            try {
+                conn.createStatement().use { it.execute("ROLLBACK") }
+            } catch (rollbackFailure: Throwable) {
+                failure.addSuppressed(rollbackFailure)
+            }
             throw failure
         }
     }
 
     private fun migrate() {
         connection().use { conn ->
-            // WAL mode is configured outside a transaction.
+            // journal_mode must be set outside a transaction; lock before reading the
+            // version so two initializers cannot both create v1 from the same stale value.
             conn.createStatement().use { it.execute("PRAGMA journal_mode = WAL") }
-            val currentVersion = conn.createStatement().use { statement ->
-                statement.executeQuery("PRAGMA user_version").use {
-                    check(it.next())
-                    it.getInt(1)
-                }
-            }
-
-            check(currentVersion <= SCHEMA_VERSION) {
-                "Database schema $currentVersion is newer than this application ($SCHEMA_VERSION)"
-            }
-
-            if (currentVersion == 0) {
-                conn.autoCommit = false
-                try {
-                    SCHEMA_V1.forEach { sql ->
-                        conn.createStatement().use { it.execute(sql) }
+            transaction(conn) { db ->
+                val currentVersion = db.createStatement().use { statement ->
+                    statement.executeQuery("PRAGMA user_version").use {
+                        check(it.next())
+                        it.getInt(1)
                     }
-                    conn.createStatement().use {
+                }
+
+                check(currentVersion <= SCHEMA_VERSION) {
+                    "Database schema $currentVersion is newer than this application ($SCHEMA_VERSION)"
+                }
+
+                if (currentVersion == 0) {
+                    SCHEMA_V1.forEach { sql ->
+                        db.createStatement().use { it.execute(sql) }
+                    }
+                    db.createStatement().use {
                         it.execute("PRAGMA user_version = $SCHEMA_VERSION")
                     }
-                    conn.commit()
-                } catch (failure: Throwable) {
-                    conn.rollback()
-                    throw failure
                 }
             }
         }

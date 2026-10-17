@@ -5,6 +5,9 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import java.sql.DriverManager
 import java.sql.SQLException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -56,6 +59,41 @@ class SqliteTaskStoreTest {
         assertEquals(first, second)
         assertEquals("original-id", second.id)
         assertEquals(1, store.listEvents(second.id).size)
+    }
+
+    @Test
+    fun concurrentPollersSerializeBeforeReadingAndCreateOnlyOneIssue() {
+        val store = createStore()
+        register(store)
+
+        val workers = 6
+        val executor = Executors.newFixedThreadPool(workers)
+        val ready = CountDownLatch(workers)
+        val release = CountDownLatch(1)
+
+        try {
+            val results = (1..workers).map { index ->
+                executor.submit<WorkflowSnapshot> {
+                    ready.countDown()
+                    check(release.await(10, TimeUnit.SECONDS))
+                    store.enqueue(411, 55, "candidate-$index")
+                }
+            }
+            assertTrue(ready.await(10, TimeUnit.SECONDS))
+            release.countDown()
+
+            val snapshots = results.map { it.get(20, TimeUnit.SECONDS) }
+            assertEquals(1, snapshots.map { it.id }.toSet().size)
+            assertEquals(1, store.listEvents(snapshots.single().id).size)
+            assertEquals(1, snapshots.map { it.version }.toSet().size)
+
+            // Reopen to confirm transaction integrity survives process recreation.
+            assertEquals(snapshots.first(), createStore().findWorkflow(411, 55))
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS))
+        }
     }
 
     @Test
