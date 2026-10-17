@@ -130,6 +130,11 @@ class GitHubIssueIntakeTest {
         assertEquals(1,
             GitHubIssueIntake(store, reader(listOf(listOf(closed)))).pollOnce(target).needsOwner)
         assertEquals(3, store.listEvents(workflow.id).size)
+        val originalAgain = GitHubIssueIntake(store, reader(listOf(listOf(issue())))).pollOnce(target)
+        assertEquals(1, originalAgain.needsOwner)
+        assertEquals(0, originalAgain.duplicates)
+        assertEquals("GITHUB_ISSUE_CHANGED",
+            assertNotNull(store.findWorkflow(411, 7)).holdReason)
         assertNull(store.findWorkflow(411, 999))
     }
 
