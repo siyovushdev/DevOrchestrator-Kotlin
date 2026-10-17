@@ -19,7 +19,7 @@ DevOrchestrator на Kotlin/JVM должен безопасно доводить
 
 ## 1. Модель состояний — четыре независимых измерения
 
-| Измерение | Значения (предложение) | Что описывает |
+| Измерение | Утверждённые значения | Что описывает |
 | --- | --- | --- |
 | `WorkflowPhase` | `QUEUED`, `CODING`, `VERIFYING`, `REVIEWING`, `READY_FOR_PR`, `PUBLISHING`, `DRAFT_PR_CREATED`, `FAILED`, `CANCELLED` | Основной путь одной Issue |
 | `AttemptState` | `PLANNED`, `STARTING`, `RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `CANCELLED` | **Одна** попытка Coding/Review, со своим ID и generation |
