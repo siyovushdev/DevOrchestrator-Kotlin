@@ -39,6 +39,23 @@
 
 Правило secrets: publisher GitHub token хранится только вне AgentRunner/agent VM; inference credentials отделены. Приватный исходный код допускается только в доверенную изолированную копию. Любые MCP/SSH/host-mounted sockets и shared directories считаются потенциальным выходом за границу и запрещены по умолчанию.
 
+## 4A. Широкие права внутри microVM без доступа к хосту (DRAFT)
+
+**Предпочитаемый для проверки вариант — Docker Sandboxes (`sbx`), не обычный Docker-контейнер.** Согласно документации Docker, `sbx` использует отдельную microVM, где агент имеет `sudo`, может устанавливать инструменты и запускать внутренний Docker Engine. Изоляция хоста обеспечивается границей VM и настройкой того, какие ресурсы реально переданы внутрь. Не считать документированную поддержку доказательством совместимости с конкретным WORK-хостом: требуется Gate S0.
+
+Предлагаемый простой execution profile:
+
+1. **Код:** `clone mode` (`sbx ... --clone`) или mountless + явный import только нужного проекта. Не использовать direct read/write mount основного рабочего дерева для недоверенного Coding.
+2. **Разрешено внутри VM:** shell, package managers, Java/Kotlin/Android SDK и build tools, временные каталоги, тесты, локальные контейнеры и запись файлов проекта. При необходимости `sudo` — **только внутри VM**.
+3. **Не передавать:** host root filesystem, host Docker socket, приватные репозитории вне scope, GitHub Publisher/WORK токены, Tailscale/SSH credentials, `SSH_AUTH_SOCK`, host-side MCP tools с доступом к системе; shared skills host mount отключать либо подвергать отдельной оценке (`--skills=off`, если поддерживается установленной версией).
+4. **Сеть:** доступ к поставщику модели и зависимостям ограниченным policy allowlist; заранее проверить, что Android/Gradle/Maven и inference действительно работают. Слишком узкий список сайтов не должен приводить к бесконечным ложным attempts.
+5. **Результат:** чтение artifacts/diff через ограниченный экспорт; Publisher — отдельный доверенный компонент с собственными полномочиями. VM можно удалить после confirmed cleanup и соблюдения R-05.
+6. **Нет повторных запросов:** в предварительно разрешённом PERSONAL режиме агент может работать автономно внутри sandbox, в том числе с режимом без интерактивных approvals, **только после реального Gate S0**. Нельзя переносить этот режим за пределы VM.
+
+`sbx` сейчас поддерживает несколько coding agents (Codex, Cursor, Claude, Gemini, OpenCode и др.). Разные модели/effort выбираются **на уровне их адаптеров/профилей** и предварительно валидируются; не считать experimental `sbx --model` универсальным способом выставлять reasoning effort у всех агентов. Изменение агента/модели не увеличивает доступ к хосту и не меняет доверенную project policy.
+
+**Ссылки для проверки реализации:** [Docker Sandbox Security](https://docs.docker.com/ai/sandboxes/security/), [Clone mode](https://docs.docker.com/ai/sandboxes/security/isolation/), [Linux prerequisites](https://docs.docker.com/ai/sandboxes/install/), [Supported agents](https://docs.docker.com/ai/sandboxes/agents/). Для Linux local `sbx` требуется Ubuntu 24.04+ и работающий KVM, что нужно проверить на реальной машине. **Технический выбор A/B и deployment по-прежнему DRAFT.**
+
 ## 5. Preflight-first: обязательный Gate S0 перед реализацией AgentRunner
 
 До разработки orchestration вокруг выбранного runtime провести ограниченную проверку **реального Codex в той же конфигурации, в которой он будет выполняться**:
@@ -54,7 +71,7 @@ Gate S0 должен выполняться до полноценного M2 Age
 
 ## 6. Безопасный пользовательский результат
 
-- Обычные PERSONAL задачи не запрашивают подтверждение на каждую попытку.
+- Обычные PERSONAL задачи не запрашивают подтверждение на каждую попытку. Agent Profile может назначать разные CLI/роли/модели/effort без выдачи дополнительных прав OS/GitHub и без пересоздания runtime-политики для каждого изменения модели.
 - При штатном PASS исполнитель автоматически переходит к независимому Review и публикации Draft PR.
 - Если preflight недостаточен: `BLOCKED: SANDBOX_INCOMPATIBLE` с одним конкретным объяснением — без создания claim/attempt.
 - Если позже фактически возник UNKNOWN: `NEEDS_OWNER` только у затронутой задачи и ресурсов; состояние REVIEW/PR не уничтожать.
