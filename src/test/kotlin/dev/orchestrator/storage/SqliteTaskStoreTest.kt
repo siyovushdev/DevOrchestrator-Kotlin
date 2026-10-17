@@ -84,7 +84,7 @@ class SqliteTaskStoreTest {
 
             val snapshots = results.map { it.get(20, TimeUnit.SECONDS) }
             assertEquals(1, snapshots.map { it.id }.toSet().size)
-            assertEquals(1, store.listEvents(snapshots.single().id).size)
+            assertEquals(1, store.listEvents(snapshots.first().id).size)
             assertEquals(1, snapshots.map { it.version }.toSet().size)
 
             // Reopen to confirm transaction integrity survives process recreation.
