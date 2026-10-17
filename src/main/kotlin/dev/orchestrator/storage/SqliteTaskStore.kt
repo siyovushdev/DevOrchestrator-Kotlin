@@ -629,12 +629,117 @@ class SqliteTaskStore(databasePath: Path) {
                     SCHEMA_V3.forEach { sql -> db.createStatement().use { it.execute(sql) } }
                     db.createStatement().use { it.execute("PRAGMA user_version = 3") }
                 }
+                if (currentVersion < 4) {
+                    SCHEMA_V4.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 4") }
+                }
             }
         }
     }
 
     private companion object {
-        const val SCHEMA_VERSION = 3
+        const val SCHEMA_VERSION = 4
+
+        val SCHEMA_V4 = listOf(
+            """
+            CREATE TABLE agent_manifest_heads(
+                adapter_id TEXT PRIMARY KEY NOT NULL,
+                provider TEXT NOT NULL,
+                current_version INTEGER NOT NULL CHECK(current_version > 0)
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE agent_manifest_versions(
+                adapter_id TEXT NOT NULL REFERENCES agent_manifest_heads(adapter_id),
+                version INTEGER NOT NULL CHECK(version > 0),
+                capabilities_json TEXT NOT NULL,
+                recorded_by TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY(adapter_id, version)
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE agent_profile_heads(
+                profile_id TEXT PRIMARY KEY NOT NULL,
+                repository_id INTEGER NOT NULL REFERENCES projects(repository_id),
+                role TEXT NOT NULL CHECK(role IN ('CODING','REVIEW','PLANNER','CHIEF')),
+                current_version INTEGER NOT NULL CHECK(current_version > 0)
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE agent_profile_versions(
+                profile_id TEXT NOT NULL REFERENCES agent_profile_heads(profile_id),
+                version INTEGER NOT NULL CHECK(version > 0),
+                adapter_id TEXT NOT NULL,
+                manifest_version INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                effort TEXT NOT NULL CHECK(effort IN ('DEFAULT','LOW','MEDIUM','HIGH','XHIGH')),
+                sandbox TEXT NOT NULL CHECK(sandbox IN (
+                    'NATIVE_PERSONAL_WRITE','NATIVE_PERSONAL_READ_ONLY'
+                )),
+                timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 30 AND 7200),
+                max_budget_micro_usd INTEGER NOT NULL
+                    CHECK(max_budget_micro_usd BETWEEN 1 AND 1000000000),
+                recorded_by TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY(profile_id, version),
+                FOREIGN KEY(adapter_id, manifest_version)
+                    REFERENCES agent_manifest_versions(adapter_id, version)
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE agent_role_bindings(
+                repository_id INTEGER NOT NULL REFERENCES projects(repository_id),
+                role TEXT NOT NULL CHECK(role IN ('CODING','REVIEW','PLANNER','CHIEF')),
+                profile_id TEXT NOT NULL,
+                profile_version INTEGER NOT NULL,
+                assignment_version INTEGER NOT NULL CHECK(assignment_version > 0),
+                recorded_by TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(repository_id, role),
+                FOREIGN KEY(profile_id, profile_version)
+                    REFERENCES agent_profile_versions(profile_id, version)
+            )
+            """.trimIndent(),
+            """
+            CREATE TABLE agent_config_events(
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK(event_type IN (
+                    'MANIFEST_DECLARED','PROFILE_CREATED','PROFILE_REVISED','ROLE_BOUND'
+                )),
+                target_id TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                recorded_at TEXT NOT NULL
+            )
+            """.trimIndent(),
+            "CREATE INDEX idx_agent_profile_heads_repo ON agent_profile_heads(repository_id,role)",
+            """
+            CREATE TRIGGER prevent_agent_manifest_versions_update
+            BEFORE UPDATE ON agent_manifest_versions BEGIN
+                SELECT RAISE(ABORT, 'immutable agent manifest version');
+            END
+            """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_agent_manifest_versions_delete
+            BEFORE DELETE ON agent_manifest_versions BEGIN
+                SELECT RAISE(ABORT, 'immutable agent manifest version');
+            END
+            """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_agent_profile_versions_update
+            BEFORE UPDATE ON agent_profile_versions BEGIN
+                SELECT RAISE(ABORT, 'immutable agent profile version');
+            END
+            """.trimIndent(),
+            """
+            CREATE TRIGGER prevent_agent_profile_versions_delete
+            BEFORE DELETE ON agent_profile_versions BEGIN
+                SELECT RAISE(ABORT, 'immutable agent profile version');
+            END
+            """.trimIndent(),
+        )
 
         val SCHEMA_V3 = listOf(
             """
