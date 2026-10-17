@@ -1,6 +1,6 @@
 # ADR-004 — GitHub intake и публикация Draft PR (минимальный MVP)
 
-**Статус:** DRAFT / требуется подтверждение Owner. **Этап:** M0 · [Issue #4](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/4).  
+**Статус:** APPROVED (Owner, 2026-10-17), для Native PERSONAL test MVP; реализация и live E2E пока не выполнены. **Этап:** M0 · [Issue #4](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/4).  
 **Основа:** ADR-001/002 APPROVED, ADR-003/S-04 Native Codex CLI APPROVED как путь MVP. Не разрешает запуск или публикацию.
 
 ## 1. Цель
@@ -43,4 +43,4 @@
 ## 7. Что отложить
 Webhook, сложный GitHub App provisioning, labels как источник полномочий, multi-repo publishing, automatic Merge, PR updates after terminal workflow, управление WORK projects в нативном небезопасном профиле.
 
-**Решение:** минимальный GitHub polling + однозначная identity + отдельный логический Publisher + подтверждение Draft PR. Сложную инфраструктуру GitHub не разрабатывать до первого E2E.
+**Решение APPROVED:** минимальный GitHub polling + однозначная identity + отдельный логический Publisher + подтверждение Draft PR. Сложную инфраструктуру GitHub не разрабатывать до первого E2E.
