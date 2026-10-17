@@ -6,6 +6,7 @@ import dev.orchestrator.storage.SqliteTaskStore
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.sql.DriverManager
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
@@ -43,4 +44,36 @@ class ProjectPolicyPersistenceTest {
         assertEquals(PolicyDecision.Denied(PolicyDenial.WORK_PUBLICATION_NEEDS_OWNER),
             ProjectPolicyEvaluator().evaluate(listOf(updated), 42, tmp.resolve("repo"), ProjectAction.PUBLISH_DRAFT))
     }
+    @Test fun legacyV1RegistryMigratesToDenyWithPreservedIdentity() {
+        val path = tmp.resolve("legacy.db")
+        DriverManager.getConnection("jdbc:sqlite:$path").use { conn ->
+            conn.createStatement().use { sql ->
+                sql.execute(
+                    """
+                    CREATE TABLE projects(
+                        project_id TEXT PRIMARY KEY NOT NULL,
+                        repository_id INTEGER UNIQUE NOT NULL,
+                        kind TEXT NOT NULL,
+                        workspace_root TEXT NOT NULL,
+                        policy_version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """.trimIndent()
+                )
+                sql.executeUpdate(
+                    "INSERT INTO projects(project_id,repository_id,kind,workspace_root) " +
+                    "VALUES ('legacy', 99, 'PERSONAL', '${tmp.toAbsolutePath()}')"
+                )
+                sql.execute("PRAGMA user_version = 1")
+            }
+        }
+        val migrated = SqliteTaskStore(path)
+        assertEquals(2, migrated.schemaVersion())
+        val policy = assertNotNull(migrated.findPolicy(99))
+        assertEquals("legacy", policy.projectId)
+        assertFalse(policy.personalAutoExecution)
+        assertEquals(1L, policy.version)
+        assertEquals(emptyList(), migrated.policyVersions(99))
+        assertEquals(policy, SqliteTaskStore(path).findPolicy(99))
+    }
+
 }
