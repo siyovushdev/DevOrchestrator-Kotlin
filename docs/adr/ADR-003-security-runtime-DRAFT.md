@@ -1,6 +1,6 @@
 # ADR-003 — безопасность без повторения permission-блокировок
 
-**Статус:** DRAFT — **S-01 APPROVED владельцем 2026-10-17** (стратегия Docker Sandboxes microVM + Gate S0 + отдельный Publisher). Остальные детали ADR-003 и готовность runtime не утверждены.  
+**Статус:** DRAFT — **S-01 и S-02 APPROVED владельцем 2026-10-17** (стратегия Docker Sandboxes microVM + Gate S0 + отдельный Publisher). Остальные детали ADR-003 и готовность runtime не утверждены.  
 **Этап:** M0, [Issue #3](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/3).  
 **Основа:** ADR-001 и ADR-002 — APPROVED. **Не разрешает написание кода, создание runtime grants или запуск агентов.**
 
@@ -22,13 +22,13 @@
 
 **Статус решения:** S-01 APPROVED как стратегия; Docker Sandboxes **не установлен и не проверен на WORK**. Полный ADR-003 DRAFT до согласования authority/security details и Gate S0; начало Kotlin-разработки требует завершения M0.
 
-## S-02 — границы доступа, сеть и перенос результата (DRAFT / предложение)
+## S-02 — границы доступа, сеть и перенос результата (APPROVED, 2026-10-17)
 
 Подготовлена подробная [модель S-02: чистый staging, файловые права, отключение host SSH/MCP/skills, сеть, контролируемая передача diff/artifacts и Gate S0](ADR-003-S02-access-and-artifacts-DRAFT.md).
 
 **Критичное уточнение по Docker:** `sbx --clone` защищает оригинальный host repository **от записи, но не от чтения** — внутри VM доступен `/run/sandbox/source`, включая ignored/untracked файлы. Поэтому в S-02 предлагается монтировать **только временный чистый staging Git repo**, а не обычный рабочий checkout с `.env`, токенами и скрытыми файлами. Default SSH agent forwarding и возможные host-side MCP/skills также необходимо явно исключить/проверить.
 
-**Статус:** S-01 APPROVED как стратегия Docker Sandboxes; **S-02 DRAFT** до отдельного согласования владельца. Запуск и установка на WORK не производились.
+**Статус:** S-01 APPROVED как стратегия Docker Sandboxes; **S-02 APPROVED**; оставшиеся решения ADR-003 требуют согласования. Запуск и установка на WORK не производились.
 
 ## 2. Предлагаемые границы доверия
 
