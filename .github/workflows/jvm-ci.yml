@@ -69,4 +69,17 @@ jobs:
           DEVORCH_GITHUB_LIVE_REPO_ID: ${{ github.repository_id }}
           DEVORCH_GITHUB_LIVE_ISSUE: '18'
           DEVORCH_GITHUB_READ_TOKEN: ${{ github.token }}
-        run: gradle --no-daemon test --tests dev.orchestrator.github.GitHubLiveReadSmokeTest
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon test --tests dev.orchestrator.github.GitHubLiveReadSmokeTest
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          result = Path("build/test-results/test/TEST-dev.orchestrator.github.GitHubLiveReadSmokeTest.xml")
+          assert result.is_file(), "Live integration test was not executed"
+          suite = ElementTree.parse(result).getroot()
+          counts = {key: int(suite.attrib.get(key, 0)) for key in ("tests", "skipped", "failures", "errors")}
+          assert counts == {"tests": 1, "skipped": 0, "failures": 0, "errors": 0}, counts
+          print("LIVE_GITHUB_READ_EXECUTED_AND_PASSED")
+          PY
