@@ -17,6 +17,7 @@ kotlin {
 dependencies {
     implementation("io.ktor:ktor-server-core-jvm:3.5.2")
     implementation("io.ktor:ktor-server-netty-jvm:3.5.2")
+    implementation("org.xerial:sqlite-jdbc:3.53.4.0")
 
     testImplementation(kotlin("test-junit5"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
