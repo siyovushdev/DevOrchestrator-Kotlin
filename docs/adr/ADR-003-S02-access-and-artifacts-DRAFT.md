@@ -1,8 +1,8 @@
 # ADR-003 / S-02 — Доступ агентов, сеть, секреты и передача результата
 
-**Статус:** DRAFT / PROPOSAL — **не утверждено владельцем**.  
+**Статус:** APPROVED владельцем 2026-10-17 — правила доступа и передачи результата; техническая работоспособность подтверждается отдельно Gate S0.  
 **Этап:** M0 · [GitHub Issue #3](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/3) · Дата черновика: 2026-10-17.  
-**Уже утверждено:** ADR-003/S-01 — Docker Sandboxes microVM как основной кандидат при обязательном Gate S0; ADR-001 и ADR-002. **S-02 пока не APPROVED; реализующий код и тесты на WORK не запускались.**
+**Уже утверждено:** ADR-003/S-01 — Docker Sandboxes microVM как основной кандидат при обязательном Gate S0; ADR-001 и ADR-002. **S-02 утверждено как архитектурный контракт. Реализующий код и тесты на WORK не запускались.**
 
 ## 1. Цель
 
@@ -107,7 +107,7 @@ GitHub Issue + Trusted Project Registry
 
 ## 8. Границы S-02 и следующие решения
 
-- **S-02 на согласовании:** чистый staging, строгие host-boundary, сеть/model credentials, контролируемый экспорт и отдельный review context.
+- **S-02 APPROVED:** чистый staging, строгие host-boundary, сеть/model credentials, контролируемый экспорт и отдельный review context. Реальные CLI-механизмы и совместимость проверяются Gate S0, а не предполагаются.
 - **S-03 (следом):** procedure/ownership Gate S0, точная схема запуска, VM budgets/cache, cleanup, S0 FAIL; правила высокорисковых WORK действий и отдельные approvals.
 - **ADR-004:** Publisher GitHub authentication/ref/CAS/PR identity/recovery.
 - **ADR-005:** Agent Catalog, роли, model/effort, adapters, automatic agent selection и evidence schema.
@@ -122,4 +122,4 @@ GitHub Issue + Trusted Project Registry
 - https://docs.docker.com/ai/sandboxes/configuration/settings/ — SSH agent forwarding default, disabled setting.
 - https://docs.docker.com/ai/sandboxes/security/defaults/ — network rules, shared skills и default capabilities.
 
-**Итог:** один готовый sandbox runtime с широкими правами *внутри*, но строго ограниченным входом и выходом. **S-02 пока DRAFT; согласование владельца требуется.**
+**Итог:** один готовый sandbox runtime с широкими правами *внутри*, но строго ограниченным входом и выходом. **S-02 APPROVED. ADR-003 в целом DRAFT до утверждения S-03 и оставшихся вопросов. Gate S0 не проводился, доступ к WORK и запуск агентов не разрешены этим документом.**
