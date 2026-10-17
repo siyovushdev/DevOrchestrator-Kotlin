@@ -30,32 +30,30 @@ class ProjectPolicyEvaluatorTest {
                 "/tmp/personal/repo", ProjectAction.PUBLISH_DRAFT))
     }
 
-    @Test fun workNeedsIndependentOwnerApprovals() {
+    @Test fun workNeverReceivesPermanentProjectWideApproval() {
+        assertEquals(PolicyDecision.Allowed,
+            check(listOf(work), 456, "/tmp/work/repo", ProjectAction.INTAKE))
         assertEquals(PolicyDecision.Denied(PolicyDenial.WORK_EXECUTION_NEEDS_OWNER),
             check(listOf(work), 456, "/tmp/work/repo", ProjectAction.EXECUTE))
-        val executionApproved = work.copy(workOwnerExecutionApproved = true)
-        assertEquals(PolicyDecision.Allowed,
-            check(listOf(executionApproved), 456, "/tmp/work/repo", ProjectAction.EXECUTE))
         assertEquals(PolicyDecision.Denied(PolicyDenial.WORK_PUBLICATION_NEEDS_OWNER),
-            check(listOf(executionApproved), 456, "/tmp/work/repo", ProjectAction.PUBLISH_DRAFT))
-        assertEquals(PolicyDecision.Allowed,
-            check(listOf(executionApproved.copy(workOwnerPublicationApproved = true)), 456,
-                "/tmp/work/repo", ProjectAction.PUBLISH_DRAFT))
+            check(listOf(work), 456, "/tmp/work/repo", ProjectAction.PUBLISH_DRAFT))
+        // No policy fields can grant WORK execution. Future Owner GO is task-specific.
+        assertFailsWith<IllegalArgumentException> {
+            work.copy(personalAutoExecution = true)
+        }
     }
 
     @Test fun pathTraversalAndBoundaryDenied() {
         val policies = listOf(personal.copy(personalAutoExecution = true))
         for (path in listOf("/tmp/personal", "/tmp/personal-evil/repo",
-                "/tmp/personal/../work/repo", "relative/path")) {
+                "/tmp/personal/../work/repo", "/tmp/personal/../personal/repo", "relative/path")) {
             assertEquals(PolicyDecision.Denied(PolicyDenial.INVALID_WORKSPACE),
                 check(policies, 123, path, ProjectAction.EXECUTE))
         }
     }
 
     @Test fun invalidOwnerSnapshotsRejected() {
-        assertFailsWith<IllegalArgumentException> {
-            personal.copy(workOwnerExecutionApproved = true)
-        }
+        assertFailsWith<IllegalArgumentException> { personal.copy(workspaceRoot = Path.of("/")) }
         assertFailsWith<IllegalArgumentException> {
             work.copy(personalAutoExecution = true)
         }
