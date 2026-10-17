@@ -41,6 +41,8 @@ class SqliteTaskStore(databasePath: Path) {
         require(project.id.isNotBlank())
         require(project.repositoryId > 0)
         require(project.workspaceRoot.isNotBlank())
+        val root = Path.of(project.workspaceRoot)
+        require(root.isAbsolute && root.normalize() == root) { "Project root must be absolute and normalized" }
 
         transaction { conn ->
             conn.prepareStatement(
@@ -93,8 +95,10 @@ class SqliteTaskStore(databasePath: Path) {
      * Trusted-owner boundary only: not wired to HTTP, Issue or agents.
      * Compare-and-swap preserves version and audit under concurrent owner updates.
      */
-    fun updatePolicyFromTrustedOwner(policy: ProjectPolicy, expectedVersion: Long): Boolean =
-        transaction { conn ->
+    fun updatePolicyFromTrustedOwner(policy: ProjectPolicy, expectedVersion: Long): Boolean {
+        require(expectedVersion > 0 && expectedVersion < Long.MAX_VALUE)
+        require(policy.version == expectedVersion + 1) { "Policy snapshot version must be next CAS version" }
+        return transaction { conn ->
             val updated = conn.prepareStatement(
                 """
                 UPDATE projects SET policy_version = policy_version + 1
@@ -138,6 +142,7 @@ class SqliteTaskStore(databasePath: Path) {
             }
             updated
         }
+    }
 
     fun policyVersions(repositoryId: Long): List<Long> = connection().use { conn ->
         conn.prepareStatement(
@@ -371,7 +376,7 @@ class SqliteTaskStore(databasePath: Path) {
                         db.createStatement().use { it.execute(sql) }
                     }
                     db.createStatement().use {
-                        it.execute("PRAGMA user_version = $SCHEMA_VERSION")
+                        it.execute("PRAGMA user_version = 1")
                     }
                 }
                 if (currentVersion < 2) {
