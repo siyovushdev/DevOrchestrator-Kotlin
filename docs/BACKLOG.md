@@ -2,12 +2,12 @@
 
 **Статус:** DRAFT. Только задачи M0 опубликованы в GitHub; M1–M6 пока остаются предложениями. Номера будущих задач назначит GitHub после согласования M0.
 
-## M0 — проектирование (открытые GitHub Issues)
+## M0 — проектирование (GitHub Issues: #2 завершена)
 
 | Key | GitHub Issue | Depends on | Definition of Done |
 |---|---|---|---|
 | M0-01 | [#1 Утвердить PRD v1](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/1) | ADR-001 | Статус APPROVED, ясные acceptance criteria |
-| M0-02 | [#2 ADR-002: состояния/UNKNOWN/recovery](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/2) | ADR-001 | Инварианты, переходы, аварийные сценарии |
+| M0-02 | [#2 ADR-002: состояния/UNKNOWN/recovery](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/2) | ADR-001 | **APPROVED**: R-01–R-06, переходы и F01–F20 (закрыта) |
 | M0-03 | [#3 ADR-003: permissions/credentials/sandbox](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/3) | M0-02 | Граница Owner/Agent, защита PERSONAL/WORK |
 | M0-04 | [#4 ADR-004: GitHub intake и Draft PR](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/4) | M0-02, M0-03 | Идентичность, retries, read-after-write, запрет Merge |
 | M0-05 | [#5 ADR-005: Codex/Review/corrections](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/5) | M0-02, M0-03 | Adapter contract, bounded attempts, независимость Review |
