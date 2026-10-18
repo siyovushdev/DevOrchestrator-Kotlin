@@ -151,12 +151,13 @@ class DraftPrPublisherTest {
             else -> error("Unexpected request $method $path")
         }
     }
-    private val sender=PublicationPush { p,staging,_ ->
+    private val sender=PublicationPush { p,staging,artifacts ->
         assertEquals(EffectState.SENDING,journal.state("wf",EffectKind.PUSH)); beforePush(); sends++
         val arguments=GitHubBranchPush("MOCK_TOKEN").arguments(p,staging).drop(1).map {
             if (it=="https://github.com/${SMOKE_TARGET.fullName}.git") bare.toString() else it
         }
-        git(temp,*arguments.toTypedArray())
+        val output=git(temp,*arguments.toTypedArray())
+        Files.writeString(artifacts.resolve("events.log"),output)
         if (lostPush) throw java.io.IOException("MOCK lost push result")
         ProcessObservation(AttemptState.SUCCEEDED,"EXITED_WITH_CLEANUP",mapper.valueToTree(clean()))
     }
@@ -347,6 +348,17 @@ print('MOCK push accepted')
         }
         assertEquals("GUARD_OR_INPUT_DENIED",publisher().publish().status)
         assertEquals(0,sends); assertEquals(0,posts)
+    }
+    @Test fun alreadyIdenticalRacingBranchIsUncertainAndDoesNotCreatePr() {
+        fixture(); beforePush={
+            val p=journal.findPlan("wf")!!
+            git(temp,"--git-dir="+root.resolve("wf/objects.git"),"push",bare.toString(),"${p.commitSha}:refs/heads/${p.headBranch}")
+        }
+        assertEquals("UNCERTAIN_NEEDS_OWNER",publisher().publish().status)
+        assertEquals(EffectState.UNCERTAIN,journal.state("wf",EffectKind.PUSH))
+        assertEquals(0,posts)
+        val plan=journal.findPlan("wf")!!
+        assertEquals(plan.commitSha,git(temp,"--git-dir=$bare","rev-parse","refs/heads/${plan.headBranch}"))
     }
     @Test fun responseSubscriberCancelsWhileReceivingOversizedBody() {
         var cancelled=false

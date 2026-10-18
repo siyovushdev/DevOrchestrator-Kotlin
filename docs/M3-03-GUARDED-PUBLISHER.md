@@ -39,8 +39,11 @@ repeated after network prechecks. No blanket launch grant is inferred from READY
 
 Git push uses a fixed HTTPS URL and a create-only empty expected-ref lease
 (`--force-with-lease=refs/heads/<deterministic-head>:`). Despite the Git option's name,
-this refuses **every existing branch**, even one permitting fast-forward; it never
-updates/rewrites an existing ref and never uses unconditional `--force`. A preflight
+this never updates/rewrites an existing branch, even one permitting fast-forward,
+and never uses unconditional `--force`. Git may treat an already-identical ref as
+up-to-date despite the empty lease. Publisher therefore additionally requires exactly
+one `*` porcelain record with the exact SHA/ref and `[new branch]`; `=`/missing/other
+records hold UNCERTAIN before PR creation. A preflight
 404 alone would have a race. The [Git push contract](https://git-scm.com/docs/git-push)
 defines the empty expected value. The result is always read back through the GitHub
 ref and commit APIs (exact OID/tree/sole parent), not inferred from exit0.
@@ -51,7 +54,9 @@ from persisted supervisor config and logs. Git has a scrubbed HOME/env, no inher
 SSH agent/GH tokens/user credential helpers/global Git config or redirects. No Codex
 process is launched with this authority. Env separation is not protection from another
 same-UID process; the dedicated isolated HOME user remains the real environment boundary.
-A request has finite connect/request time and a body bounded while receiving; no
+A request has finite connect time, an explicit 20-second full-response deadline with
+async cancellation (JDK21's request timeout alone ends at headers), and a body bounded
+while receiving; no
 application send retry or redirect forwarding. Interrupted/failed sends are uncertain.
 
 A single POST uses `draft=true`, fixed base/head, and controller-generated provenance.

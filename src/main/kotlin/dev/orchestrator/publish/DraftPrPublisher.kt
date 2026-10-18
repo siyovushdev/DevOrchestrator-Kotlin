@@ -82,8 +82,10 @@ internal class DraftPrPublisher(
                         localCommit(plan)
                     }
                     EffectKind.PUSH -> {
-                        val result=push.send(plan,dir.resolve("objects.git"),privateDirectory(dir.resolve("push")))
+                        val artifacts=privateDirectory(dir.resolve("push"))
+                        val result=push.send(plan,dir.resolve("objects.git"),artifacts)
                         check(result.state==AttemptState.SUCCEEDED)
+                        checkNewBranch(plan,artifacts.resolve("events.log"))
                         remotePush(plan)
                     }
                     EffectKind.DRAFT_PR -> {
@@ -291,6 +293,14 @@ internal class DraftPrPublisher(
         api.checkBase(plan)
         check(api.ref(plan.headBranch)==plan.commitSha && PublicationReceiptMatcher.matches(plan,EffectKind.COMMIT,api.commit(plan)))
         return PublicationReadBack.Push(target.repositoryId,target.fullName,plan.headBranch,plan.commitSha)
+    }
+    private fun checkNewBranch(plan: PublicationPlan,log: Path) {
+        check(Files.isRegularFile(log,NOFOLLOW_LINKS) && (Files.getAttribute(log,"unix:nlink",NOFOLLOW_LINKS) as Number).toInt()==1)
+        val bytes=Files.newInputStream(log,NOFOLLOW_LINKS).use { it.readNBytes(1_048_577) }
+        check(bytes.size<=1_048_576)
+        val records=bytes.toString(Charsets.UTF_8).lineSequence().map { it.split('\t') }
+            .filter { it.size==3 && it[0] in listOf(" ","+","-","*","=","!") }.toList()
+        check(records.single()==listOf("*","${plan.commitSha}:refs/heads/${plan.headBranch}","[new branch]"))
     }
     private fun confirmedUrl(workflow: String): String? = journal.receipt(workflow,EffectKind.DRAFT_PR)?.let {
         mapper.readTree(it).path("matches").single().path("url").asText()

@@ -19,6 +19,9 @@ import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.Flow
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.net.http.HttpTimeoutException
 import java.io.ByteArrayOutputStream
 
 internal val SMOKE_TARGET = GitHubRepositoryTarget("siyovushdev","devorch-kotlin-e2e-smoke",1424152600)
@@ -40,18 +43,30 @@ internal class GitHubPublicationHttp(private val token: String) : PublicationHtt
             .timeout(Duration.ofSeconds(20)).header("Authorization","Bearer $token")
             .header("Accept","application/vnd.github+json").header("X-GitHub-Api-Version","2022-11-28")
             .header("User-Agent","DevOrchestrator-Kotlin-Publisher")
+            .apply { if (body!=null) header("Content-Type","application/json") }
             .method(method,if (body==null) HttpRequest.BodyPublishers.noBody() else {
                 require(body.length<=65536)
                 HttpRequest.BodyPublishers.ofString(body)
             }).build()
-        return try {
-            val response = client.send(request) { LimitedPublicationBody() }
-            PublicationResponse(response.statusCode(),response.body().toString(Charsets.UTF_8))
-        } catch (e: InterruptedException) { Thread.currentThread().interrupt(); throw e }
+        val response = sendPublicationRequest(client,request)
+        return PublicationResponse(response.statusCode(),response.body().toString(Charsets.UTF_8))
     }
 }
 
-/** Bound bytes while receiving; request timeout covers this subscriber's completion. */
+/** JDK21 request timeout ends at headers. Bound full response completion and cancel I/O. */
+internal fun sendPublicationRequest(client: HttpClient,request: HttpRequest,timeoutMillis: Long = 20000): HttpResponse<ByteArray> {
+    require(timeoutMillis in 1..20000)
+    val pending=client.sendAsync(request) { LimitedPublicationBody() }
+    try { return pending.get(timeoutMillis,TimeUnit.MILLISECONDS) }
+    catch (e: Exception) {
+        pending.cancel(true) // Best effort only: a timed-out POST remains an uncertain effect.
+        if (e is InterruptedException) Thread.currentThread().interrupt()
+        if (e is TimeoutException) throw HttpTimeoutException("Publication HTTP deadline exceeded")
+        throw e
+    }
+}
+
+/** Bound bytes while receiving, independently of the full-response deadline above. */
 internal class LimitedPublicationBody(private val limit: Int = 1_000_000) : HttpResponse.BodySubscriber<ByteArray> {
     private val result = CompletableFuture<ByteArray>()
     private val bytes = ByteArrayOutputStream()
@@ -155,8 +170,8 @@ esac
     internal fun arguments(plan: PublicationPlan, staging: Path): List<String> = listOf(git.toRealPath().toString(),
         "--git-dir=$staging","-c","credential.helper=","-c","http.followRedirects=false","-c","core.hooksPath=/dev/null",
         "push","--porcelain","--no-verify",
-        // Empty lease is CREATE-ONLY: denies every existing ref, even a fast-forward.
-        // This never rewrites an existing branch and cannot relax to --force.
+        // Empty lease never updates an existing ref. Git may report an identical
+        // ref as up-to-date: Publisher additionally requires '*' new-branch evidence.
         "--force-with-lease=refs/heads/${plan.headBranch}:",
         "https://github.com/${plan.owner}/${plan.repository}.git","${plan.commitSha}:refs/heads/${plan.headBranch}")
 }
