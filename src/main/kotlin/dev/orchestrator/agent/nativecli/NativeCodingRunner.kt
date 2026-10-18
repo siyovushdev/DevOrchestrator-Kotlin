@@ -86,13 +86,19 @@ internal class NativeCodingRunner(
             if (!sourceMatches(intent.workspace,intent.baseSha,intent.sourceTree,true))
                 return CodingRunResult(null,"SOURCE_MISMATCH")
         } catch (_: GitOutcomeUnknown) {
-            journal.completeObserved(attemptId,AttemptState.UNKNOWN,
-                mapper.writeValueAsString(mapOf("attempt_id" to attemptId,"reason" to "GIT_PREFLIGHT_UNKNOWN")))
-            return CodingRunResult(AttemptState.UNKNOWN,"GIT_PREFLIGHT_UNKNOWN")
+            return preflightUnknown(attemptId)
         } catch (_: Exception) { return CodingRunResult(null,"INVALID_LOCAL_INPUT") }
         val artifacts = try { Files.createDirectory(artifactRoot.resolve(attemptId),
             PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         } catch (_: Exception) { return CodingRunResult(null,"ARTIFACT_DIRECTORY_EXISTS_OR_INVALID") }
+        // Status can trust forged stat data in a caller's index. Independently hash
+        // current files via a fresh index before any Coding spawn, then compare the
+        // actual tree to the pinned input. Never attribute old dirt to the agent.
+        try {
+            if (stageTree(intent.workspace,intent.baseSha,artifacts.resolve("baseline.index"))!=intent.sourceTree)
+                return CodingRunResult(null,"WORKTREE_CONTENT_CHANGED",artifacts)
+        } catch (_: GitOutcomeUnknown) { return preflightUnknown(attemptId,artifacts) }
+        catch (_: Exception) { return CodingRunResult(null,"BASELINE_CAPTURE_FAILED",artifacts) }
         val lastMessage = artifacts.resolve("last-message.txt")
         val command = CodexExecCommandPlanner.plan(codex.toRealPath(),intent.workspace,lastMessage,assigned)
         val helper = artifacts.resolve("supervisor.py")
@@ -124,6 +130,7 @@ internal class NativeCodingRunner(
             val receipt = mapper.writeValueAsString(mapOf("attempt_id" to attemptId,"reason" to reason,
                 "artifacts" to artifacts.toString(),"candidate_tree" to tree,"observed" to evidence,
                 "profile_id" to intent.profileId,"profile_version" to intent.profileVersion,
+                "base_sha" to intent.baseSha,"input_tree" to intent.sourceTree,"issue_body_sha256" to intent.issueBodySha256,
                 "assignment_version" to intent.assignmentVersion,"manifest_version" to intent.manifestVersion,
                 "model" to assigned.profile.model,"effort" to assigned.profile.effort.name,
                 "timeout_ms" to limitMs,"output_limit_bytes" to outputLimit,
@@ -213,10 +220,7 @@ internal class NativeCodingRunner(
                 return complete(AttemptState.UNKNOWN,"POST_RUN_SOURCE_IDENTITY_CHANGED",observed)
             val index = artifacts.resolve("candidate.index")
             fun indexed(vararg args: String): String = gitCommand(intent.workspace,args.toList(),index)
-            indexed("read-tree",intent.baseSha)
-            indexed("add","--all","--",".")
-            val tree = indexed("write-tree").trim()
-            check(tree.matches(Regex("[0-9a-f]{40}")))
+            val tree = stageTree(intent.workspace,intent.baseSha,index)
             if (tree==intent.sourceTree) return complete(AttemptState.FAILED,"NO_CANDIDATE_DIFF",observed)
             val diff = indexed("diff","--cached","--binary","--no-ext-diff","--no-textconv",intent.baseSha)
             check(diff.isNotBlank())
@@ -236,6 +240,20 @@ internal class NativeCodingRunner(
         if (gitCommand(workspace,listOf("rev-parse","--verify","HEAD")).trim()!=base ||
             gitCommand(workspace,listOf("rev-parse","--verify","HEAD^{tree}")).trim()!=tree) return false
         return !requireClean || gitCommand(workspace,listOf("status","--porcelain=v1","--untracked-files=all")).isBlank()
+    }
+
+    private fun stageTree(workspace: Path, base: String, index: Path): String {
+        gitCommand(workspace,listOf("read-tree",base),index)
+        gitCommand(workspace,listOf("add","--all","--","."),index)
+        return gitCommand(workspace,listOf("write-tree"),index).trim().also {
+            check(it.matches(Regex("[0-9a-f]{40}")))
+        }
+    }
+
+    private fun preflightUnknown(attemptId: String, artifacts: Path? = null): CodingRunResult {
+        journal.completeObserved(attemptId,AttemptState.UNKNOWN,
+            mapper.writeValueAsString(mapOf("attempt_id" to attemptId,"reason" to "GIT_PREFLIGHT_UNKNOWN")))
+        return CodingRunResult(AttemptState.UNKNOWN,"GIT_PREFLIGHT_UNKNOWN",artifacts)
     }
 
     private fun gitCommand(workspace: Path, suffix: List<String>, index: Path? = null): String {

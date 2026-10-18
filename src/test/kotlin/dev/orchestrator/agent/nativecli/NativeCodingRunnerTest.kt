@@ -7,6 +7,9 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.ByteBuffer
+import java.nio.file.attribute.FileTime
+import java.security.MessageDigest
 import java.sql.DriverManager
 import java.time.Duration
 import java.time.Instant
@@ -256,6 +259,45 @@ Path('.gitattributes').write_text('* filter=trap\n')
         assertEquals("INTERRUPTED",result.get().reason)
         assertTrue(restored.get())
         assertEquals(0,claimCount())
+    }
+
+    @Test fun assumeUnchangedCannotHideDirtyPinnedBaselineAndLaunchCoding() {
+        setup()
+        git("update-index","--assume-unchanged","README")
+        Files.writeString(clone.resolve("README"),"dirty before Coding\n")
+        assertEquals("",git("status","--porcelain=v1"),"Positive control: status hides this dirt")
+        assertFalse(TrustedGitCheckoutGuard.accepts(clone))
+        val result = runner().run("attempt")
+        assertNull(result.state,result.reason)
+        assertFalse(Files.exists(clone.resolve("launches")))
+        assertEquals(AttemptState.PLANNED,journal.find("attempt")?.state)
+    }
+
+    @Test fun freshBaselineIndexDetectsDirtyContentEvenWhenNormalIndexStatDataMatches() {
+        setup()
+        val file = clone.resolve("README")
+        val size = Files.size(file)
+        Files.write(file,ByteArray(size.toInt()) { 'x'.code.toByte() })
+        val index = clone.resolve(".git/index")
+        val bytes = Files.readAllBytes(index)
+        val fields = ByteBuffer.wrap(bytes)
+        fields.position(12) // First tracked entry is README; mimic an old matching stat cache.
+        val ctime = (Files.getAttribute(file,"unix:ctime") as FileTime).toInstant()
+        val mtime = Files.getLastModifiedTime(file).toInstant()
+        fields.putInt(ctime.epochSecond.toInt()).putInt(ctime.nano)
+        fields.putInt(mtime.epochSecond.toInt()).putInt(mtime.nano)
+        fields.position(12+36); fields.putInt(size.toInt())
+        val checksum = MessageDigest.getInstance("SHA-1").digest(bytes.copyOf(bytes.size-20))
+        checksum.copyInto(bytes,bytes.size-20)
+        Files.write(index,bytes)
+        Files.setLastModifiedTime(index,FileTime.fromMillis(System.currentTimeMillis()+60_000))
+        assertTrue(TrustedGitCheckoutGuard.accepts(clone),"Ordinary index, no assume-unchanged flag")
+        assertEquals("",git("status","--porcelain=v1"),"Positive control: cached stat conceals content")
+        val result = runner().run("attempt")
+        assertEquals("WORKTREE_CONTENT_CHANGED",result.reason)
+        assertNull(result.state)
+        assertFalse(Files.exists(clone.resolve("launches")))
+        assertEquals(AttemptState.PLANNED,journal.find("attempt")?.state)
     }
 
     companion object {

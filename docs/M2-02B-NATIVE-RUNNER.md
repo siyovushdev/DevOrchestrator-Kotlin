@@ -8,14 +8,21 @@ It does not prove model/auth/proxy inference or this new Runner on HOME.
 ## What runs
 
 `NativeCodingRunner.run(attemptId)` is an internal, synchronous trusted call on
-one configured PERSONAL repository/Issue #1, with at most 120 seconds (or the
-stricter profile timeout), 1 MiB event/last-message bound and no retries. It reuses
+one configured PERSONAL repository/Issue #1, with a Coding child deadline of
+120 seconds (or the stricter profile timeout), 1 MiB event capture/read limits
+and no retries. Git probes have separate 8-second bounds and cleanup/receipt
+collection has bounded grace periods. Last-message oversize is monitored and
+rejected; this is not a hard disk quota. It reuses
 `CodingAttemptJournal`, `SqliteAgentCatalog`, `CodexExecCommandPlanner` and the
 bounded Git reader. Main/HTTP/intake do not call it. No new schema, scheduler,
 permission framework, adapter abstraction or publisher was added.
 
 Before spawn: current policy/hold/profile/source checks; exact clean HEAD/tree;
-new private artifact directory; durable STARTING. RUNNING records PID + Linux
+independent content equality through a fresh temporary baseline index (status
+alone can hide dirty files through cached stat/assume-unchanged). CE_VALID index
+entries are also rejected. Neither hidden baseline dirt nor forged stat data is
+attributed to Coding. A new private artifact directory precedes durable STARTING.
+RUNNING records PID + Linux
 start ticks + boot/machine identity in existing events. HOME/CODEX_HOME and a
 minimal trusted PATH are explicit. Only Codex receives HTTP_PROXY/HTTPS_PROXY/
 ALL_PROXY and lowercase equivalents, NODE_USE_ENV_PROXY=1 and local NO_PROXY,
