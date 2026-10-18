@@ -184,4 +184,37 @@ class PublicationJournalTest {
         assertEquals(before,store.findWorkflow(1,1))
         assertTrue(PublicationJournal(database).prepare(plan))
     }
+
+    @Test fun confirmedPrIdentityIsImmutableAcrossRestartAndDifferentSingletonReadBack() {
+        val (_,j) = setup()
+        confirmedThroughPush(j)
+        assertTrue(j.markSending("workflow",EffectKind.DRAFT_PR,plan.candidateManifestSha256))
+        val original = PublicationReadBack.Drafts(listOf(pr()))
+        assertTrue(j.confirm("workflow",EffectKind.DRAFT_PR,original))
+        val restarted = PublicationJournal(database)
+        assertTrue(restarted.confirm("workflow",EffectKind.DRAFT_PR,original))
+        val another = pr().copy(number=43,url="https://github.com/owner/disposable/pull/43")
+        assertFalse(restarted.confirm("workflow",EffectKind.DRAFT_PR,PublicationReadBack.Drafts(listOf(another))))
+        assertEquals(3,count("publication_receipts"))
+    }
+
+    @Test fun everyAllowedWorkflowIdBoundaryProducesDistinctValidGitBranch() {
+        val ids = listOf("workflow.","workflow.lock","workflow..x","a","a".repeat(128),"a_b-c.d")
+        val branches = ids.map { plan.copy(workflowId=it).headBranch }
+        assertEquals(ids.size,branches.toSet().size)
+        for (branch in branches) {
+            val process = ProcessBuilder("/usr/bin/git","check-ref-format","--branch",branch)
+                .redirectErrorStream(true)
+            process.environment().clear()
+            process.environment()["GIT_CONFIG_NOSYSTEM"]="1"
+            process.environment()["GIT_CONFIG_GLOBAL"]="/dev/null"
+            process.directory(temp.toFile())
+            val child = process.start()
+            child.outputStream.close()
+            val output = child.inputStream.readNBytes(1024)
+            assertTrue(child.waitFor(5,TimeUnit.SECONDS))
+            assertEquals(0,child.exitValue(),String(output))
+            assertTrue(branch.length < 255)
+        }
+    }
 }

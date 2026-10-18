@@ -1,5 +1,7 @@
 package dev.orchestrator.storage
 
+import java.util.Base64
+
 /** Trusted controller input, never agent prose; not a security/Owner authorization. */
 internal data class PublicationPlan(
     val workflowId: String,
@@ -19,7 +21,10 @@ internal data class PublicationPlan(
     val policyVersion: Long,
     val workflowVersion: Long,
 ) {
-    val headBranch: String get() = "devorch/$repositoryId/$issueNumber/$workflowId"
+    // URL-safe encoding is injective and contains no '.' or '/' ref hazards, even
+    // for valid workflow IDs ending in '.'/'.lock' or containing '..'. No truncation.
+    val headBranch: String get() = "devorch/$repositoryId/$issueNumber/w-" +
+        Base64.getUrlEncoder().withoutPadding().encodeToString(workflowId.toByteArray(Charsets.UTF_8))
 
     init {
         listOf(workflowId,codingAttemptId,reviewerAttemptId,candidateId).forEach {

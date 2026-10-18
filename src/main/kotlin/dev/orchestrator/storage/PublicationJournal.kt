@@ -68,14 +68,17 @@ internal class PublicationJournal(database: Path) {
     fun confirm(workflowId: String, kind: EffectKind, receipt: PublicationReadBack): Boolean = db.write { c ->
         val plan = readPlan(c,workflowId) ?: return@write false
         if (!PublicationReceiptMatcher.matches(plan,kind,receipt)) return@write false
+        val encodedReceipt = mapper.writeValueAsString(receipt)
         val before = readState(c,workflowId,kind)
-        if (before == EffectState.CONFIRMED) return@write true
+        if (before == EffectState.CONFIRMED) return@write c.rows(
+            "SELECT evidence FROM publication_receipts WHERE effect_id=?",effectId(workflowId,kind),
+        ) { it.getString(1) }.singleOrNull() == encodedReceipt
         if (before != EffectState.SENDING && before != EffectState.UNCERTAIN) return@write false
         val now = Instant.now().toString()
         check(c.mutate("UPDATE effects_outbox SET state='CONFIRMED' WHERE effect_id=? AND state IN ('SENDING','UNCERTAIN')",
             effectId(workflowId,kind)) == 1)
         c.mutate("INSERT INTO publication_receipts(effect_id,evidence,recorded_at) VALUES (?,?,?)",
-            effectId(workflowId,kind),mapper.writeValueAsString(receipt),now)
+            effectId(workflowId,kind),encodedReceipt,now)
         event(c,workflowId,"PUBLICATION_CONFIRMED",kind.name,now)
         true
     }

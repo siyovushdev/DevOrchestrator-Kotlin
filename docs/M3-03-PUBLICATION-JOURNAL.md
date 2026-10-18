@@ -6,6 +6,9 @@ Issue #33, stacked on #32. **Persistence only; real Publisher/E2E NOT_RUN.**
 publication plans and full matched read-back receipts. A plan pins workflow,
 repo ID/full name, Issue, base ref/SHA, deterministic head branch and commit OID,
 candidate ID/tree/manifest digest, Coding/Review IDs, generation and policy version.
+The head ref encodes the entire workflow ID with URL-safe unpadded base64,
+avoiding ref hazards such as trailing dots, `.lock` or `..` without collisions
+from sanitization or truncation.
 
 `prepare` serializes the current PERSONAL policy, READY_FOR_PR/NONE/version,
 pinned Issue base and succeeded Coding/Review rows (Review source tree matches
@@ -39,6 +42,8 @@ Only exact trusted read-back observations can confirm:
   base branch/SHA and `draft=true`.
 
 The matched full receipt is persisted, not merely HTTP success or agent prose.
+Repeated confirmation must exactly equal the persisted full receipt; a second
+singleton PR with a different number/URL is not the same confirmed effect.
 A mismatch retains SENDING; the caller must reconcile or hold, never resend.
 `holdUnreconciledSends` makes unresolved sends UNCERTAIN + NEEDS_OWNER and retains
 all intents. Confirmation after read-only reconciliation does not clear the
