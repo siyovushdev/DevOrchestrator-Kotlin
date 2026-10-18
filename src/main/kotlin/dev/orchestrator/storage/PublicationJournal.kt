@@ -46,13 +46,45 @@ internal class PublicationJournal(database: Path) {
         readState(it,workflowId,kind)
     }
 
+    /** Trusted Publisher only; all source/process/Owner checks remain its responsibility. */
+    fun beginPublishing(plan: PublicationPlan): Boolean = db.write { c ->
+        if (readPlan(c,plan.workflowId)!=plan || !policy(c,plan) || !ready(c,plan)) return@write false
+        c.mutate("""UPDATE workflows SET phase='PUBLISHING',version=version+1,updated_at=?
+            WHERE workflow_id=? AND phase='READY_FOR_PR' AND version=? AND hold='NONE'""",
+            Instant.now().toString(),plan.workflowId,plan.workflowVersion)==1
+    }
+
+    fun receipt(workflowId: String, kind: EffectKind): String? = db.read { c ->
+        c.rows("SELECT evidence FROM publication_receipts WHERE effect_id=?",effectId(workflowId,kind)) {
+            it.getString(1)
+        }.singleOrNull()
+    }
+
+    fun uncertain(workflowId: String, kind: EffectKind, reason: String) = db.write { c ->
+        val now = Instant.now().toString()
+        c.mutate("UPDATE effects_outbox SET state='UNCERTAIN' WHERE effect_id=? AND state='SENDING'",effectId(workflowId,kind))
+        c.mutate("""UPDATE workflows SET hold='NEEDS_OWNER',hold_reason=?,version=version+1,updated_at=?
+            WHERE workflow_id=? AND hold!='NEEDS_OWNER'""",reason,now,workflowId)
+        event(c,workflowId,"PUBLICATION_UNCERTAIN",kind.name,now)
+    }
+
+    fun finish(plan: PublicationPlan): Boolean = db.write { c ->
+        if (readPlan(c,plan.workflowId)!=plan || !policy(c,plan) || !terminalAttempts(c,plan) ||
+            EffectKind.entries.any { readState(c,plan.workflowId,it)!=EffectState.CONFIRMED }) return@write false
+        val changed = c.mutate("""UPDATE workflows SET phase='DRAFT_PR_CREATED',version=version+1,updated_at=?
+            WHERE workflow_id=? AND phase='PUBLISHING' AND hold='NONE' AND version=? AND corrections_used=?""",
+            Instant.now().toString(),plan.workflowId,plan.workflowVersion+1,plan.generation)==1
+        if (changed) event(c,plan.workflowId,"DRAFT_PR_CREATED",effectId(plan.workflowId,EffectKind.DRAFT_PR),Instant.now().toString())
+        changed
+    }
+
     /** Exactly one durable send intent; previous effect confirmed, current guards repeated. */
     fun markSending(workflowId: String, kind: EffectKind, verifiedManifestSha256: String): Boolean = db.write { c ->
         val plan = readPlan(c,workflowId) ?: return@write false
         if (verifiedManifestSha256 != plan.candidateManifestSha256 || !policy(c,plan)) return@write false
         val publishing = c.rows("""SELECT 1 FROM workflows WHERE workflow_id=? AND repository_id=?
-            AND phase='PUBLISHING' AND hold='NONE' AND corrections_used=?""",workflowId,plan.repositoryId,
-                plan.generation) { 1 }.singleOrNull() != null
+            AND phase='PUBLISHING' AND hold='NONE' AND corrections_used=? AND version=?""",workflowId,plan.repositoryId,
+                plan.generation,plan.workflowVersion+1) { 1 }.singleOrNull() != null
         if (!publishing || !terminalAttempts(c,plan)) return@write false
         val previous = when (kind) { EffectKind.COMMIT -> null; EffectKind.PUSH -> EffectKind.COMMIT
             EffectKind.DRAFT_PR -> EffectKind.PUSH }

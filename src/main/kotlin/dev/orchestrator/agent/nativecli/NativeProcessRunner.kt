@@ -20,6 +20,7 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
 
     fun run(argv: List<String>, workspace: Path, environment: Map<String,String>, artifacts: Path,
             prompt: ByteArray, limitMs: Long, lastMessage: Path? = null,
+            privateEnvironment: Map<String,String> = emptyMap(),
             onStarted: (Map<String,String>) -> Boolean): ProcessObservation {
         var interrupted = false
         var process: Process? = null
@@ -30,11 +31,15 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
             val helperReceipt = artifacts.resolve("supervisor-receipt.json")
             Files.writeString(config,mapper.writeValueAsString(mapOf("argv" to argv,
                 "cwd" to workspace.toString(),"env" to environment,"timeout_ms" to limitMs,
+                "private_env_names" to privateEnvironment.keys.toList(),
                 "receipt" to helperReceipt.toString())),CREATE_NEW,WRITE)
             val builder = ProcessBuilder(python.toRealPath().toString(),"-I","-S",helper.toString(),config.toString())
                 .directory(artifacts.toFile()).redirectErrorStream(true)
             builder.environment().clear()
             builder.environment().putAll(mapOf("HOME" to artifacts.toString(),"PATH" to "/usr/bin:/bin","LANG" to "C"))
+            // Publisher credentials travel in process memory/env, never launch.json/logs.
+            require(privateEnvironment.keys.all { it == "DEVORCH_PUBLISH_TOKEN" })
+            builder.environment().putAll(privateEnvironment)
             process = builder.start()
             val proc = process
             val birth = processIdentity(proc.pid())
