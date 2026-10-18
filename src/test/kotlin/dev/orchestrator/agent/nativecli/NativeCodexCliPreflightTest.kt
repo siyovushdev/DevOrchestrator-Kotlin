@@ -38,9 +38,9 @@ class NativeCodexCliPreflightTest {
 
     private fun fakeCli(validHelp: Boolean = true): Path = fake("codex", """
         if [ "$1" = "--version" ]; then
-          printf 'codex-cli 0.999.0\\n'
+          printf 'codex-cli 0.999.0\n'
         elif [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-          printf '%s\\n' '${if (validHelp) "--sandbox --model --json --output-last-message --config" else "--model --json"}'
+          printf '%s\n' '${if (validHelp) "--sandbox --model --json --output-last-message --config" else "--model --json"}'
         else
           exit 9
         fi
@@ -49,8 +49,8 @@ class NativeCodexCliPreflightTest {
     private fun fakeGit(dirty: Boolean = false, actualSha: String = sha): Path =
         fake("git", """
             case "$*" in
-              *rev-parse*) printf '%s\\n' '$actualSha' ;;
-              *status*) ${if (dirty) "printf '?? .env\\n'" else ":"} ;;
+              *rev-parse*) printf '%s\n' '$actualSha' ;;
+              *status*) ${if (dirty) "printf '?? .env\n'" else ":"} ;;
               *) exit 7 ;;
             esac
         """.trimIndent())
