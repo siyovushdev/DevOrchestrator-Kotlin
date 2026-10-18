@@ -131,7 +131,7 @@ class ProjectPolicyPersistenceTest {
             }
         }
         val migrated = SqliteTaskStore(path)
-        assertEquals(6, migrated.schemaVersion())
+        assertEquals(7, migrated.schemaVersion())
         val project = assertNotNull(migrated.findPolicy(99))
         assertEquals("legacy", project.projectId)
         assertFalse(project.personalAutoExecution)

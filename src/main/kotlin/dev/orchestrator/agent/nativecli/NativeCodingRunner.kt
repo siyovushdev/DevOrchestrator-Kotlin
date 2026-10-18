@@ -17,8 +17,6 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 internal data class CodingRunResult(
     val state: AttemptState?, // null: blocked before consuming a launch intent
@@ -83,7 +81,7 @@ internal class NativeCodingRunner(
             listOf(codex,git,python).forEach {
                 require(it.isAbsolute && it.normalize()==it && Files.isRegularFile(it.toRealPath()) && Files.isExecutable(it))
             }
-            if (!sourceMatches(intent.workspace,intent.baseSha,intent.sourceTree,true))
+            if (!sourceMatches(intent.workspace,intent.baseSha,intent.generation==0))
                 return CodingRunResult(null,"SOURCE_MISMATCH")
         } catch (_: GitOutcomeUnknown) {
             return preflightUnknown(attemptId)
@@ -101,10 +99,6 @@ internal class NativeCodingRunner(
         catch (_: Exception) { return CodingRunResult(null,"BASELINE_CAPTURE_FAILED",artifacts) }
         val lastMessage = artifacts.resolve("last-message.txt")
         val command = CodexExecCommandPlanner.plan(codex.toRealPath(),intent.workspace,lastMessage,assigned)
-        val helper = artifacts.resolve("supervisor.py")
-        javaClass.getResourceAsStream("/native-codex-supervisor.py")!!.use {
-            Files.copy(it,helper)
-        }
         val proxy = "http://127.0.0.1:$proxyPort"
         val childEnv = linkedMapOf("HOME" to home.toString(),"CODEX_HOME" to home.resolve(".codex").toString(),
             "PATH" to listOf(codex.parent.toString(),codex.toRealPath().parent.toString(),"/usr/bin","/bin")
@@ -113,19 +107,13 @@ internal class NativeCodingRunner(
             "no_proxy" to "localhost,127.0.0.1,::1")
         for (name in listOf("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"))
             childEnv[name] = proxy
-        val config = artifacts.resolve("launch.json")
-        val helperReceipt = artifacts.resolve("supervisor-receipt.json")
         val limitMs = minOf(timeout.toMillis(),assigned.profile.timeoutSeconds*1000L)
-        Files.writeString(config,mapper.writeValueAsString(mapOf("argv" to command.argumentVector,
-            "cwd" to intent.workspace.toString(),"env" to childEnv,"timeout_ms" to limitMs,
-            "receipt" to helperReceipt.toString())),CREATE_NEW,WRITE)
+        val feedback = store.listEvents(intent.workflowId).lastOrNull { it.type=="CORRECTION_REQUESTED" }?.detail.orEmpty()
         val prompt = ("Implement only the pinned Issue below in this disposable PERSONAL checkout. " +
             "Do not publish, access credentials or change Git metadata. Run its offline tests.\n" +
-            "Issue #${intent.issueNumber}: ${issue.title}\n${issue.body}\n").toByteArray(Charsets.UTF_8)
+            "Issue #${intent.issueNumber}: ${issue.title}\n${issue.body}\nCorrection feedback: $feedback\n").toByteArray(Charsets.UTF_8)
         if (!journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
 
-        var interrupted = false
-        var process: Process? = null
         fun complete(state: AttemptState, reason: String, evidence: Any? = null, tree: String? = null): CodingRunResult {
             val receipt = mapper.writeValueAsString(mapOf("attempt_id" to attemptId,"reason" to reason,
                 "artifacts" to artifacts.toString(),"candidate_tree" to tree,"observed" to evidence,
@@ -140,83 +128,18 @@ internal class NativeCodingRunner(
             return CodingRunResult(if (written) state else AttemptState.UNKNOWN,
                 if (written) reason else "JOURNAL_STATE_CHANGED",artifacts,tree)
         }
+        val observation = NativeProcessRunner(python,outputLimit).run(command.argumentVector,intent.workspace,
+            childEnv,artifacts,prompt,limitMs,lastMessage) { birth ->
+            journal.markRunning(attemptId,mapper.writeValueAsString(mapOf("attempt_id" to attemptId,
+                "identity" to birth,"cli_binary" to codex.toRealPath().toString(),
+                "profile_id" to intent.profileId,"profile_version" to intent.profileVersion)))
+        }
+        val observed = observation.evidence
+        if (observation.state != AttemptState.SUCCEEDED)
+            return complete(observation.state,observation.reason,observed)
         try {
-            val builder = ProcessBuilder(python.toRealPath().toString(),"-I","-S",helper.toString(),config.toString())
-                .directory(artifacts.toFile()).redirectErrorStream(true)
-            builder.environment().clear()
-            builder.environment().putAll(mapOf("HOME" to artifacts.toString(),"PATH" to "/usr/bin:/bin","LANG" to "C"))
-            process = builder.start()
-            val proc = process
-            val birth = processIdentity(proc.pid())
-            if (!journal.markRunning(attemptId,mapper.writeValueAsString(mapOf("attempt_id" to attemptId,
-                    "identity" to birth,"cli_binary" to codex.toRealPath().toString(),
-                    "profile_id" to intent.profileId,"profile_version" to intent.profileVersion)))) {
-                proc.toHandle().destroy()
-                proc.waitFor(8,TimeUnit.SECONDS)
-                return complete(AttemptState.UNKNOWN,"RUNNING_RECEIPT_REJECTED")
-            }
-            val oversized = AtomicBoolean(false)
-            val readFailed = AtomicBoolean(false)
-            val inputFailed = AtomicBoolean(false)
-            val drain = Thread({
-                try {
-                    Files.newOutputStream(artifacts.resolve("events.log"),CREATE_NEW,WRITE).use { output ->
-                        proc.inputStream.use { input ->
-                            val buffer = ByteArray(8192)
-                            var captured = 0
-                            while (true) {
-                                val count = input.read(buffer)
-                                if (count<0) break
-                                val kept = minOf(count,outputLimit-captured)
-                                output.write(buffer,0,kept)
-                                captured += kept
-                                if (kept<count && oversized.compareAndSet(false,true)) proc.toHandle().destroy()
-                            }
-                        }
-                    }
-                } catch (_: Exception) { readFailed.set(true); proc.toHandle().destroy() }
-            },"devorch-coding-output").apply { isDaemon=true; start() }
-            val writer = Thread({
-                try { proc.outputStream.use { it.write(prompt) } }
-                catch (_: Exception) { inputFailed.set(true) }
-            },"devorch-coding-input").apply { isDaemon=true; start() }
-            val deadline = System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(limitMs+10_000)
-            var stopped = false
-            var ended = false
-            while (System.nanoTime()<deadline) {
-                try { if (proc.waitFor(50,TimeUnit.MILLISECONDS)) { ended=true; break } }
-                catch (_: InterruptedException) { interrupted=true; proc.toHandle().destroy(); stopped=true }
-                if (interrupted && stopped) break
-                if (Files.exists(lastMessage,NOFOLLOW_LINKS) && Files.size(lastMessage)>outputLimit) {
-                    oversized.set(true); proc.toHandle().destroy()
-                }
-            }
-            if (!ended) {
-                proc.toHandle().destroy()
-                ended = proc.waitFor(8,TimeUnit.SECONDS)
-                if (!ended) { proc.destroyForcibly(); proc.waitFor(2,TimeUnit.SECONDS) }
-            }
-            drain.join(2000); writer.join(2000)
-            if (!ended || drain.isAlive || writer.isAlive || readFailed.get())
-                return complete(AttemptState.UNKNOWN,"PROCESS_OR_STREAM_OUTCOME_UNKNOWN")
-            val observed = mapper.readTree(boundedFile(helperReceipt,8192))
-            val clean = observed.path("cleanup_echild").asBoolean(false) &&
-                observed.path("supervisor").path("pid").asLong()==proc.pid() &&
-                observed.path("supervisor").path("start_ticks").asText()==birth["start_ticks"] &&
-                observed.path("boot_id").asText()==birth["boot_id"] &&
-                observed.path("machine_id").asText()==birth["machine_id"] &&
-                observed.path("child").path("pid").asLong()>0 &&
-                observed.path("child").path("start_ticks").asText().isNotEmpty() &&
-                observed.path("exit_code").isInt && proc.exitValue()==0
-            if (!clean) return complete(AttemptState.UNKNOWN,"CLEANUP_NOT_PROVEN",observed)
-            if (interrupted || oversized.get() || inputFailed.get() || observed["exit_code"].asInt()!=0 ||
-                observed.path("cause").asText()!="exited")
-                return complete(AttemptState.FAILED,when {
-                    interrupted -> "INTERRUPTED"; oversized.get() -> "OUTPUT_LIMIT"
-                    else -> observed.path("cause").asText()+"_exit_"+observed["exit_code"].asInt()
-                },observed)
             boundedFile(lastMessage,outputLimit)
-            if (!sourceMatches(intent.workspace,intent.baseSha,intent.sourceTree,false))
+            if (!sourceMatches(intent.workspace,intent.baseSha,false))
                 return complete(AttemptState.UNKNOWN,"POST_RUN_SOURCE_IDENTITY_CHANGED",observed)
             val index = artifacts.resolve("candidate.index")
             fun indexed(vararg args: String): String = gitCommand(intent.workspace,args.toList(),index)
@@ -227,18 +150,13 @@ internal class NativeCodingRunner(
             Files.writeString(artifacts.resolve("candidate.diff"),diff,CREATE_NEW,WRITE)
             return complete(AttemptState.SUCCEEDED,"CANDIDATE_CAPTURED_TESTS_NOT_VERIFIED",observed,tree)
         } catch (_: Exception) {
-            process?.destroy()
-            try { process?.waitFor(8,TimeUnit.SECONDS) } catch (_: InterruptedException) { interrupted=true }
             return complete(AttemptState.UNKNOWN,"RUNNER_EVIDENCE_INCOMPLETE")
-        } finally {
-            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 
-    private fun sourceMatches(workspace: Path, base: String, tree: String, requireClean: Boolean): Boolean {
+    private fun sourceMatches(workspace: Path, base: String, requireClean: Boolean): Boolean {
         if (!TrustedGitCheckoutGuard.accepts(workspace)) return false
-        if (gitCommand(workspace,listOf("rev-parse","--verify","HEAD")).trim()!=base ||
-            gitCommand(workspace,listOf("rev-parse","--verify","HEAD^{tree}")).trim()!=tree) return false
+        if (gitCommand(workspace,listOf("rev-parse","--verify","HEAD")).trim()!=base) return false
         return !requireClean || gitCommand(workspace,listOf("status","--porcelain=v1","--untracked-files=all")).isBlank()
     }
 
@@ -273,13 +191,6 @@ internal class NativeCodingRunner(
         require(Files.isRegularFile(path,NOFOLLOW_LINKS) &&
             (Files.getAttribute(path,"unix:nlink",NOFOLLOW_LINKS) as Number).toInt()==1 && Files.size(path)<=limit)
         return Files.newInputStream(path,NOFOLLOW_LINKS).use { it.readNBytes(limit+1) }.also { check(it.size<=limit) }
-    }
-
-    private fun processIdentity(pid: Long): Map<String,String> {
-        val fields = Files.readString(Path.of("/proc/$pid/stat")).substringAfterLast(')').trim().split(Regex("\\s+"))
-        return mapOf("pid" to pid.toString(),"start_ticks" to fields[19],
-            "boot_id" to Files.readString(Path.of("/proc/sys/kernel/random/boot_id")).trim(),
-            "machine_id" to Files.readString(Path.of("/etc/machine-id")).trim())
     }
 
     private class GitOutcomeUnknown : Exception()

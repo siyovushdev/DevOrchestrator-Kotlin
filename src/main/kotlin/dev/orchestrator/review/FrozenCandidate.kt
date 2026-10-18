@@ -65,12 +65,15 @@ internal class FrozenCandidate private constructor(
         private data class FileDigest(val size: Long, val sha256: String, val executable: Boolean)
 
         /** Destination is new; failures preserve incomplete evidence, never overwrite/delete. */
-        fun capture(source: Path, snapshotRoot: Path, candidateId: String, binding: CandidateBinding): FrozenCandidate {
+        fun capture(source: Path, snapshotRoot: Path, candidateId: String, binding: CandidateBinding,
+                    selectedPaths: Set<String>? = null): FrozenCandidate {
             require(candidateId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")))
             canonicalDirectory(source)
             canonicalDirectory(snapshotRoot)
             require(!source.startsWith(snapshotRoot) && !snapshotRoot.startsWith(source))
-            val before = inventory(source, skipRootGit = true)
+            selectedPaths?.forEach { safeRelative(it) }
+            val before = inventory(source, skipRootGit = true, selectedPaths=selectedPaths)
+            require(selectedPaths==null || before.keys==selectedPaths) { "Missing candidate file" }
             val destination = Files.createDirectory(snapshotRoot.resolve(candidateId))
             val files = Files.createDirectory(destination.resolve("files"))
             for ((relative, expected) in before) {
@@ -93,7 +96,7 @@ internal class FrozenCandidate private constructor(
                 Files.setPosixFilePermissions(target,PosixFilePermissions.fromString(
                     if (expected.executable) "rwxr-xr-x" else "rw-r--r--"))
             }
-            check(inventory(source, skipRootGit = true) == before) { "Candidate changed during capture" }
+            check(inventory(source, skipRootGit = true, selectedPaths=selectedPaths) == before) { "Candidate changed during capture" }
             check(inventory(files) == before) { "Snapshot differs from candidate" }
             val header = listOf("DEVORCH-FROZEN-2",candidateId,binding.workflowId,binding.codingAttemptId,
                 binding.codingSessionId,binding.generation.toString(),binding.baseSha,binding.candidateTree,
@@ -135,7 +138,7 @@ internal class FrozenCandidate private constructor(
             return FrozenCandidate(candidateId,directory,binding,expectedManifestSha256,files.toMap()).also { require(it.isIntact()) }
         }
 
-        private fun inventory(root: Path, skipRootGit: Boolean = false): Map<String,FileDigest> {
+        private fun inventory(root: Path, skipRootGit: Boolean = false, selectedPaths: Set<String>? = null): Map<String,FileDigest> {
             canonicalDirectory(root)
             val result = sortedMapOf<String,FileDigest>()
             var entries = 0
@@ -144,13 +147,19 @@ internal class FrozenCandidate private constructor(
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
                     check(++entries <= MAX_FILES * 2)
                     if (skipRootGit && dir == root.resolve(".git")) return FileVisitResult.SKIP_SUBTREE
-                    if (dir != root) safeRelative(root.relativize(dir).toString())
+                    if (dir != root) {
+                        val relative = root.relativize(dir).toString()
+                        if (selectedPaths!=null && selectedPaths.none { it.startsWith("$relative/") })
+                            return FileVisitResult.SKIP_SUBTREE
+                        safeRelative(relative)
+                    }
                     check(!attrs.isSymbolicLink)
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                     check(++entries <= MAX_FILES * 2 && result.size < MAX_FILES)
                     val name = root.relativize(file).toString()
+                    if (selectedPaths!=null && name !in selectedPaths) return FileVisitResult.CONTINUE
                     safeRelative(name)
                     check(attrs.isRegularFile && !attrs.isSymbolicLink && attrs.size() <= MAX_FILE_BYTES)
                     check((Files.getAttribute(file,"unix:nlink",NOFOLLOW_LINKS) as Number).toInt() == 1)
