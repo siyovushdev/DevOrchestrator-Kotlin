@@ -178,9 +178,10 @@ class PublicationJournalTest {
     @Test fun v5MigrationPreservesWorkflowAndDoesNotAdoptExistingOutbox() {
         val (store,_) = setup()
         val before = store.findWorkflow(1,1)
-        sql("DROP TABLE publication_receipts","DROP TABLE publication_plans",
+        sql("DROP TABLE review_inputs","DROP TABLE correction_requests","DROP TABLE workflow_verifications",
+            "DROP TABLE publication_receipts","DROP TABLE publication_plans",
             "DROP TRIGGER immutable_publication_effect_identity","PRAGMA user_version=5")
-        assertEquals(6,SqliteTaskStore(database).schemaVersion())
+        assertEquals(7,SqliteTaskStore(database).schemaVersion())
         assertEquals(before,store.findWorkflow(1,1))
         assertTrue(PublicationJournal(database).prepare(plan))
     }

@@ -26,6 +26,7 @@ internal data class CodingIntent(
     val manifestVersion: Long,
     val workspace: Path,
     val plannedWorkflowVersion: Long,
+    val generation: Int,
 )
 
 /**
@@ -38,15 +39,23 @@ internal class CodingAttemptJournal(database: Path) {
     private val catalog = SqliteAgentCatalog(database)
 
     fun plan(repositoryId: Long, issueNumber: Int, expectedWorkflowVersion: Long,
-             attemptId: String, workspace: Path, sourceTree: String): CodingIntent? {
+             attemptId: String, workspace: Path, sourceTree: String): CodingIntent? =
+        planInternal(repositoryId,issueNumber,expectedWorkflowVersion,attemptId,workspace,sourceTree,false)
+
+    fun planCorrection(repositoryId: Long, issueNumber: Int, expectedWorkflowVersion: Long,
+                       attemptId: String, workspace: Path, sourceTree: String): CodingIntent? =
+        planInternal(repositoryId,issueNumber,expectedWorkflowVersion,attemptId,workspace,sourceTree,true)
+
+    private fun planInternal(repositoryId: Long, issueNumber: Int, expectedWorkflowVersion: Long,
+             attemptId: String, workspace: Path, sourceTree: String, correction: Boolean): CodingIntent? {
         require(attemptId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")))
         require(sourceTree.matches(Regex("[0-9a-f]{40}")))
         return db.write { conn ->
             val workflow = conn.rows("""
-                SELECT workflow_id,version FROM workflows WHERE repository_id=? AND issue_number=?
+                SELECT workflow_id,version,corrections_used FROM workflows WHERE repository_id=? AND issue_number=?
                 AND version=? AND phase='QUEUED' AND hold='NONE'
             """.trimIndent(), repositoryId, issueNumber, expectedWorkflowVersion) {
-                it.getString(1) to it.getLong(2)
+                Triple(it.getString(1),it.getLong(2),it.getInt(3))
             }.singleOrNull() ?: return@write null
             val policy = policy(conn, repositoryId) ?: return@write null
             if (!safeWorkspace(workspace, policy.first)) return@write null
@@ -61,10 +70,21 @@ internal class CodingAttemptJournal(database: Path) {
             }.singleOrNull() ?: return@write null
             if (!source.first.matches(Regex("[0-9a-f]{64}")) ||
                 !source.second.matches(Regex("[0-9a-f]{40}"))) return@write null
-            // Initial generation cannot replace any previous attempt, including UNKNOWN.
-            if (conn.rows("SELECT 1 FROM agent_attempts WHERE workflow_id=?", workflow.first) { 1 }.isNotEmpty())
+            val generation = if (correction) workflow.third+1 else 0
+            if (correction) {
+                val request = conn.rows("""SELECT 1 FROM correction_requests r JOIN workflow_verifications v
+                    ON v.workflow_id=r.workflow_id AND v.generation=r.generation
+                    WHERE r.workflow_id=? AND r.generation=? AND r.source_tree=?
+                    AND v.correction_limit>? AND v.state IN ('SUCCEEDED','FAILED')""",
+                    workflow.first,workflow.third,sourceTree,workflow.third) { 1 }.singleOrNull()
+                if (generation !in 1..2 || request == null) return@write null
+                if (conn.rows("""SELECT 1 FROM agent_attempts WHERE workflow_id=?
+                    AND state NOT IN ('SUCCEEDED','FAILED')""",workflow.first) { 1 }.isNotEmpty()) return@write null
+            } else if (workflow.third != 0 ||
+                conn.rows("SELECT 1 FROM agent_attempts WHERE workflow_id=?",workflow.first) { 1 }.isNotEmpty())
                 return@write null
-            if (conflictingAttempt(conn,repositoryId,workspace)) return@write null
+            if (conflictingAttempt(conn,repositoryId,workspace,completedWorkflow=if (correction) workflow.first else null))
+                return@write null
             val reservations = conn.rows("SELECT repository_id,workspace FROM runtime_reservations") {
                 it.getLong(1) to Path.of(it.getString(2))
             }
@@ -72,7 +92,7 @@ internal class CodingAttemptJournal(database: Path) {
                     workspace.startsWith(path) || path.startsWith(workspace) }) return@write null
             val now = Instant.now().toString()
             conn.mutate("""INSERT INTO agent_attempts(attempt_id,workflow_id,role,generation,state,source_tree,recorded_at)
-                VALUES (?,?,'CODING',0,'PLANNED',?,?)""", attemptId, workflow.first, sourceTree, now)
+                VALUES (?,?,'CODING',?,'PLANNED',?,?)""", attemptId, workflow.first, generation, sourceTree, now)
             conn.mutate("""INSERT INTO attempt_contexts(attempt_id,repository_id,issue_number,issue_body_sha256,
                 base_sha,policy_version,assignment_version,profile_id,profile_version,adapter_id,manifest_version,
                 workspace,planned_workflow_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -81,9 +101,9 @@ internal class CodingAttemptJournal(database: Path) {
                 assigned.profile.adapterId, assigned.profile.manifestVersion, workspace.toString(), workflow.second + 1)
             conn.mutate("INSERT INTO runtime_reservations(attempt_id,repository_id,workspace) VALUES (?,?,?)",
                 attemptId, repositoryId, workspace.toString())
-            check(conn.mutate("""UPDATE workflows SET phase='CODING',version=version+1,updated_at=?
+            check(conn.mutate("""UPDATE workflows SET phase='CODING',corrections_used=?,version=version+1,updated_at=?
                 WHERE workflow_id=? AND version=? AND hold='NONE' AND phase='QUEUED'""",
-                now, workflow.first, expectedWorkflowVersion) == 1)
+                generation, now, workflow.first, expectedWorkflowVersion) == 1)
             event(conn, workflow.first, "CODING_PLANNED", attemptId, now)
             read(conn, attemptId)
         }
@@ -132,7 +152,8 @@ internal class CodingAttemptJournal(database: Path) {
         val current = policy(conn, intent.repositoryId) ?: return@write false
         if (current.second != intent.policyVersion || !safeWorkspace(intent.workspace, current.first))
             return@write false
-        if (conflictingAttempt(conn,intent.repositoryId,intent.workspace,intent.attemptId)) return@write false
+        if (conflictingAttempt(conn,intent.repositoryId,intent.workspace,intent.attemptId,
+                completedWorkflow=if (intent.generation>0) intent.workflowId else null)) return@write false
         val assigned = catalog.findAssignedProfile(conn, intent.repositoryId, AgentRole.CODING)
             ?: return@write false
         if (!nativeCoding(assigned) || assigned.assignment.assignmentVersion != intent.assignmentVersion ||
@@ -154,10 +175,11 @@ internal class CodingAttemptJournal(database: Path) {
     }
 
     /** Conservative restart path: hold all unresolved starts, retain reservations; never retry. */
-    fun holdUnreconciledStarts(): Int = db.write { conn ->
+    fun holdUnreconciledStarts(workflowId: String? = null): Int = db.write { conn ->
         val unresolved = conn.rows("""SELECT a.attempt_id,a.workflow_id FROM agent_attempts a
             JOIN attempt_contexts c ON c.attempt_id=a.attempt_id
-            WHERE a.state IN ('STARTING','RUNNING')""") { it.getString(1) to it.getString(2) }
+            WHERE a.role='CODING' AND a.state IN ('STARTING','RUNNING')
+            AND (? IS NULL OR a.workflow_id=?)""",workflowId,workflowId) { it.getString(1) to it.getString(2) }
         val now = Instant.now().toString()
         for ((id, workflow) in unresolved) {
             conn.mutate("UPDATE agent_attempts SET state='UNKNOWN' WHERE attempt_id=?", id)
@@ -177,14 +199,16 @@ internal class CodingAttemptJournal(database: Path) {
     private fun nativeCoding(assigned: AssignedAgentProfile): Boolean =
         assigned.profile.adapterId == "codex-cli" && assigned.profile.provider == "openai"
 
-    private fun conflictingAttempt(conn: Connection, repo: Long, workspace: Path, own: String? = null): Boolean {
+    private fun conflictingAttempt(conn: Connection, repo: Long, workspace: Path, own: String? = null,
+                                   completedWorkflow: String? = null): Boolean {
         // Legacy attempts have no precise workspace/cleanup receipt. Their registered
         // root is the minimum conservative affected scope, even across repository IDs.
-        return conn.rows("""SELECT a.attempt_id,w.repository_id,p.workspace_root,c.workspace
+        return conn.rows("""SELECT a.attempt_id,w.repository_id,p.workspace_root,c.workspace,a.workflow_id,a.state
             FROM agent_attempts a JOIN workflows w ON w.workflow_id=a.workflow_id
             JOIN projects p ON p.repository_id=w.repository_id
             LEFT JOIN attempt_contexts c ON c.attempt_id=a.attempt_id""") { r ->
-            if (r.getString(1) == own) false
+            if (r.getString(1) == own || (r.getString(5)==completedWorkflow &&
+                r.getString(6) in setOf("SUCCEEDED","FAILED"))) false
             else if (r.getLong(2) == repo) true
             else {
                 val scope = Path.of(r.getString(4) ?: r.getString(3))
@@ -203,14 +227,14 @@ internal class CodingAttemptJournal(database: Path) {
     } catch (_: Exception) { false }
 
     private fun read(conn: Connection, id: String): CodingIntent? = conn.rows("""
-        SELECT a.attempt_id,a.workflow_id,a.state,a.source_tree,c.* FROM agent_attempts a
+        SELECT a.attempt_id,a.workflow_id,a.state,a.source_tree,a.generation,c.* FROM agent_attempts a
         JOIN attempt_contexts c ON c.attempt_id=a.attempt_id WHERE a.attempt_id=? AND a.role='CODING'
     """.trimIndent(), id) { r -> CodingIntent(r.getString("attempt_id"),r.getString("workflow_id"),
         r.getLong("repository_id"),r.getInt("issue_number"),AttemptState.valueOf(r.getString("state")),
         r.getString("source_tree"),r.getString("base_sha"),r.getString("issue_body_sha256"),
         r.getLong("policy_version"),r.getLong("assignment_version"),r.getString("profile_id"),
         r.getLong("profile_version"),r.getString("adapter_id"),r.getLong("manifest_version"),
-        Path.of(r.getString("workspace")),r.getLong("planned_workflow_version")) }.singleOrNull()
+        Path.of(r.getString("workspace")),r.getLong("planned_workflow_version"),r.getInt("generation")) }.singleOrNull()
 
     private fun event(conn: Connection, workflow: String, type: String, detail: String, now: String) {
         conn.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES (?,?,?,?)",
