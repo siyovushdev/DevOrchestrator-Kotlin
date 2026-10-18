@@ -17,7 +17,7 @@ import java.nio.file.attribute.BasicFileAttributes
 internal object TrustedGitCheckoutGuard {
     private val nofollow = arrayOf(LinkOption.NOFOLLOW_LINKS)
     private val filterAttribute = Regex("""(?i)(?:^|\s)[!-]?(?:filter(?:=|\s|$))""")
-    private val sectionPattern = Regex("""\[([a-zA-Z]+)(?: "([a-zA-Z0-9._/-]+)")?]""")
+    private val sectionPattern = Regex("""\[([a-zA-Z]+)(?: "([a-zA-Z0-9._/-]+)")?\]""")
     private val keyValuePattern = Regex("""([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.*)""")
     private const val MAX_CONFIG_BYTES = 32_768L
     private const val MAX_ATTRIBUTE_BYTES = 65_536L
@@ -36,6 +36,9 @@ internal object TrustedGitCheckoutGuard {
         if (listOf("commondir", "gitdir", "config.worktree", "worktrees", "modules")
                 .any { Files.exists(git.resolve(it), LinkOption.NOFOLLOW_LINKS) }) return false
         if (Files.exists(git.resolve("objects/info/alternates"), LinkOption.NOFOLLOW_LINKS)) return false
+        val index = git.resolve("index")
+        if (Files.exists(index, LinkOption.NOFOLLOW_LINKS) &&
+            !Files.isRegularFile(index, *nofollow)) return false
         if (!validLocalConfig(git.resolve("config"))) return false
         val localAttributes = git.resolve("info/attributes")
         if (Files.exists(localAttributes, LinkOption.NOFOLLOW_LINKS) &&
@@ -91,7 +94,7 @@ internal object TrustedGitCheckoutGuard {
             val key = entry.groupValues[1].lowercase()
             val value = entry.groupValues[2].trim()
             if (value.isEmpty() || value.length > 512 ||
-                value.contains('\\') || value.contains('"') || value.contains('\\u0000')
+                value.contains('\\') || value.contains('"') || value.contains(0.toChar())
             ) return false
             val allowed = when (section) {
                 "core" -> when (key) {
