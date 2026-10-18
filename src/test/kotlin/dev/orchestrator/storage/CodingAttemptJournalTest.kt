@@ -145,6 +145,30 @@ class CodingAttemptJournalTest {
         assertNull(CodingAttemptJournal(database).plan(3,1,0,"work-attempt",clone,tree))
     }
 
+    @Test fun legacyUnknownAcrossRepoIdsBlocksSharedOrNestedRootsAndStartingRechecks() {
+        val (store,clone) = setup()
+        val (_,otherClone) = setup(2)
+        // Reserve repo2 before a legacy worker appears, then recheck at STARTING.
+        val journal = CodingAttemptJournal(database)
+        assertNotNull(journal.plan(2,1,0,"planned-2",otherClone,tree))
+        DriverManager.getConnection("jdbc:sqlite:$database").use { c -> c.createStatement().use {
+            // Fixture emulates an old process scope covering both registered roots.
+            it.execute("UPDATE projects SET workspace_root='${temp}' WHERE repository_id=1")
+            it.execute("""INSERT INTO agent_attempts(attempt_id,workflow_id,role,generation,state,recorded_at)
+                VALUES ('legacy','w-1-1','CODING',0,'UNKNOWN','old')""")
+        } }
+        assertFalse(journal.markStarting("planned-2"))
+        pin(store,2,2)
+        assertNull(journal.plan(2,2,0,"nested-root",otherClone,tree))
+        // Same canonical clone, different stable repo ID, no reservation on the legacy worker.
+        val (_,third) = setup(3)
+        DriverManager.getConnection("jdbc:sqlite:$database").use { c -> c.createStatement().use {
+            it.execute("UPDATE projects SET workspace_root='${clone.parent}' WHERE repository_id=3")
+        } }
+        assertNull(journal.plan(3,1,0,"shared-clone",clone,tree))
+        assertTrue(Files.isDirectory(third))
+    }
+
     @Test fun heldLegacyAndSymlinkedWorkspaceCannotPlan() {
         val (store,clone) = setup()
         val journal = CodingAttemptJournal(database)

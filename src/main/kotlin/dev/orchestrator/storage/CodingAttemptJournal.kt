@@ -64,10 +64,7 @@ internal class CodingAttemptJournal(database: Path) {
             // Initial generation cannot replace any previous attempt, including UNKNOWN.
             if (conn.rows("SELECT 1 FROM agent_attempts WHERE workflow_id=?", workflow.first) { 1 }.isNotEmpty())
                 return@write null
-            // Legacy rows have no context/cleanup receipt. Absence of a reservation is NOT
-            // evidence that their process released this repository.
-            if (conn.rows("""SELECT 1 FROM agent_attempts a JOIN workflows w ON w.workflow_id=a.workflow_id
-                WHERE w.repository_id=?""", repositoryId) { 1 }.isNotEmpty()) return@write null
+            if (conflictingAttempt(conn,repositoryId,workspace)) return@write null
             val reservations = conn.rows("SELECT repository_id,workspace FROM runtime_reservations") {
                 it.getLong(1) to Path.of(it.getString(2))
             }
@@ -101,6 +98,7 @@ internal class CodingAttemptJournal(database: Path) {
         val current = policy(conn, intent.repositoryId) ?: return@write false
         if (current.second != intent.policyVersion || !safeWorkspace(intent.workspace, current.first))
             return@write false
+        if (conflictingAttempt(conn,intent.repositoryId,intent.workspace,intent.attemptId)) return@write false
         val assigned = catalog.findAssignedProfile(conn, intent.repositoryId, AgentRole.CODING)
             ?: return@write false
         if (!nativeCoding(assigned) || assigned.assignment.assignmentVersion != intent.assignmentVersion ||
@@ -144,6 +142,25 @@ internal class CodingAttemptJournal(database: Path) {
 
     private fun nativeCoding(assigned: AssignedAgentProfile): Boolean =
         assigned.profile.adapterId == "codex-cli" && assigned.profile.provider == "openai"
+
+    private fun conflictingAttempt(conn: Connection, repo: Long, workspace: Path, own: String? = null): Boolean {
+        // Legacy attempts have no precise workspace/cleanup receipt. Their registered
+        // root is the minimum conservative affected scope, even across repository IDs.
+        return conn.rows("""SELECT a.attempt_id,w.repository_id,p.workspace_root,c.workspace
+            FROM agent_attempts a JOIN workflows w ON w.workflow_id=a.workflow_id
+            JOIN projects p ON p.repository_id=w.repository_id
+            LEFT JOIN attempt_contexts c ON c.attempt_id=a.attempt_id""") { r ->
+            if (r.getString(1) == own) false
+            else if (r.getLong(2) == repo) true
+            else {
+                val scope = Path.of(r.getString(4) ?: r.getString(3))
+                try {
+                    val real = scope.toRealPath()
+                    workspace.startsWith(real) || real.startsWith(workspace)
+                } catch (_: Exception) { true } // Unknown filesystem identity cannot release ownership.
+            }
+        }.any { it }
+    }
 
     private fun safeWorkspace(workspace: Path, root: Path): Boolean = try {
         workspace.isAbsolute && workspace.normalize() == workspace && root.isAbsolute &&

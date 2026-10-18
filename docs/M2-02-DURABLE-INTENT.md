@@ -13,7 +13,9 @@ Within one `BEGIN IMMEDIATE` transaction on the existing SQLite database it:
 - Pins exact Issue body hash/base, trusted-caller source tree, policy version,
   assignment version and immutable profile/manifest references.
 - Reserves repository and canonical workspace, rejecting overlapping paths and
-  legacy attempts without cleanup evidence. Current slice has no release API.
+  legacy attempts without cleanup evidence. A legacy attempt conservatively
+  occupies its registered root across all repository IDs; an unknown physical
+  scope denies reuse. This is repeated at STARTING. Current slice has no release API.
 - Saves PLANNED + context + reservation + CODING phase + event atomically.
 
 `markStarting` repeats policy/binding/workflow/workspace checks and consumes
