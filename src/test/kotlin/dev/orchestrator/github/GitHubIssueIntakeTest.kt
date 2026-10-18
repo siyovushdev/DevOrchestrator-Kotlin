@@ -279,6 +279,46 @@ class GitHubIssueIntakeTest {
         assertNull(store.findWorkflow(411,7))
     }
 
+    @Test fun collidingStableIdsOnSamePageAreRejectedBeforeAnyWorkflowWrite() {
+        val store = db()
+        allowPersonal(store)
+        assertFailsWith<IllegalArgumentException> {
+            GitHubIssueIntake(store, reader(listOf(listOf(
+                issue(number = 7, id = 7007), issue(number = 8, id = 7007)
+            )))).pollOnce(target)
+        }
+        assertNull(store.findWorkflow(411, 7))
+        assertNull(store.findWorkflow(411, 8))
+    }
+
+    @Test fun collidingStableIdsAcrossPagesNeverPartiallyImportFirstPage() {
+        val store = db()
+        allowPersonal(store)
+        val firstPage = (1..100).map { issue(number = it, id = 20_000L + it) }
+        val conflictingPage = listOf(issue(number = 101, id = 20_001L))
+        assertFailsWith<IllegalArgumentException> {
+            GitHubIssueIntake(store, reader(listOf(firstPage, conflictingPage)))
+                .pollOnce(target)
+        }
+        assertNull(store.findWorkflow(411, 1))
+        assertNull(store.findWorkflow(411, 101))
+    }
+
+    @Test fun identityAlreadyPinnedToAnotherIssueNumberIsRejectedExplicitly() {
+        val store = db()
+        allowPersonal(store)
+        assertEquals(1, GitHubIssueIntake(store, reader(listOf(listOf(issue()))))
+            .pollOnce(target).created)
+        val original = assertNotNull(store.findPinnedGitHubIssue(411, 7))
+        val failure = assertFailsWith<IllegalStateException> {
+            GitHubIssueIntake(store, reader(listOf(listOf(issue(number = 8, id = 7007)))))
+                .pollOnce(target)
+        }
+        assertTrue(failure.message.orEmpty().contains("GITHUB_STABLE_ISSUE_ID_CONFLICT"))
+        assertEquals(original, store.findPinnedGitHubIssue(411, 7))
+        assertNull(store.findWorkflow(411, 8))
+    }
+
     @Test fun sixConcurrentPollersCreateOnePinnedRecord() {
         val store = db()
         allowPersonal(store)
