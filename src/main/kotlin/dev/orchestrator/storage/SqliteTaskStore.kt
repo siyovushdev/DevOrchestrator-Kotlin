@@ -633,12 +633,16 @@ class SqliteTaskStore(databasePath: Path) {
                     SCHEMA_V4.forEach { sql -> db.createStatement().use { it.execute(sql) } }
                     db.createStatement().use { it.execute("PRAGMA user_version = 4") }
                 }
+                if (currentVersion < 5) {
+                    RuntimeSchema.v5.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 5") }
+                }
             }
         }
     }
 
     private companion object {
-        const val SCHEMA_VERSION = 4
+        const val SCHEMA_VERSION = 5
 
         val SCHEMA_V4 = listOf(
             """
