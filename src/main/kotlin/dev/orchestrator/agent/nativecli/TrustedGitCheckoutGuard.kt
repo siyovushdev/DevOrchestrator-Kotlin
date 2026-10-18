@@ -39,6 +39,8 @@ internal object TrustedGitCheckoutGuard {
         val index = git.resolve("index")
         if (Files.exists(index, LinkOption.NOFOLLOW_LINKS) &&
             !Files.isRegularFile(index, *nofollow)) return false
+        if (Files.exists(index, LinkOption.NOFOLLOW_LINKS) &&
+            !StandaloneGitIndex.accepts(index)) return false
         // Never permit symlinks/FIFOs/devices anywhere in local Git metadata.
         // Even an innocent-looking top-level .git can hide external references.
         var metaEntries = 0
@@ -78,12 +80,17 @@ internal object TrustedGitCheckoutGuard {
                 visited++
                 if (visited > MAX_WALK_ENTRIES) { safe = false; return FileVisitResult.TERMINATE }
                 if (dir == git) return FileVisitResult.SKIP_SUBTREE
+                if (dir.fileName.toString() == ".git") {
+                    safe = false
+                    return FileVisitResult.TERMINATE
+                }
                 return FileVisitResult.CONTINUE
             }
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                 visited++
                 if (visited > MAX_WALK_ENTRIES) { safe = false; return FileVisitResult.TERMINATE }
-                if (file.fileName.toString() == ".gitmodules") {
+                if (file.fileName.toString() in setOf(".git", ".gitmodules") ||
+                    !attrs.isRegularFile) {
                     safe = false
                     return FileVisitResult.TERMINATE
                 }

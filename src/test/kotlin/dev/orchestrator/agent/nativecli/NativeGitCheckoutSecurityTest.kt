@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -131,6 +132,102 @@ class NativeGitCheckoutSecurityTest {
         assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE),
             inspect(probe,sha))
         assertFalse(Files.exists(marker),"Process filter must never execute")
+    }
+
+    private fun commit(cwd: Path) = runGit(cwd, "-c", "user.name=Test",
+        "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", "fixture")
+
+    private fun embeddedFilter(root: Path, effect: Path): String {
+        Files.createDirectories(root)
+        if (!Files.exists(root.resolve(".git"))) {
+            runGit(root, "init", "-q", "--initial-branch=main")
+        }
+        val sub = Files.createDirectories(root.resolve("sub"))
+        runGit(sub, "init", "-q", "--initial-branch=main")
+        Files.writeString(sub.resolve("f.txt"), "old\n")
+        runGit(sub, "add", "f.txt")
+        commit(sub)
+        runGit(root, "add", "sub") // Embedded repo/gitlink WITHOUT .gitmodules.
+        commit(root)
+        val sha = runGit(root, "rev-parse", "HEAD")
+        runGit(sub, "config", "filter.trap.clean", "touch '${effect}'; cat")
+        Files.createDirectories(sub.resolve(".git/info"))
+        Files.writeString(sub.resolve(".git/info/attributes"), "f.txt filter=trap\n")
+        Files.writeString(sub.resolve("f.txt"), "new\n")
+        Files.setLastModifiedTime(sub.resolve("f.txt"), FileTime.fromMillis(1_000_000))
+        assertFalse(Files.exists(effect))
+        return sha
+    }
+
+    @Test fun embeddedFilterHasUnsafePositiveControlButProductionRejectsBeforeAnyGit() {
+        val (probe, _) = setup()
+        val control = temp.resolve("intentionally-unsafe-control")
+        val controlMarker = temp.resolve("control-filter-executed")
+        embeddedFilter(control, controlMarker)
+        // Intentionally unsafe command ONLY against a separate disposable fixture.
+        runGit(control, "status", "--porcelain=v1", "--untracked-files=all")
+        assertTrue(Files.exists(controlMarker), "Control must actually exercise the inner filter")
+
+        val sha = embeddedFilter(clone, marker)
+        assertFalse(Files.exists(clone.resolve(".gitmodules")))
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE),
+            inspect(probe, sha))
+        assertFalse(Files.exists(marker), "Production preflight must not execute inner filter")
+        // Independently establish the filesystem guard even if the index is absent.
+        Files.delete(clone.resolve(".git/index"))
+        assertFalse(TrustedGitCheckoutGuard.accepts(clone))
+    }
+
+    @Test fun nestedGitfileSymlinkAndUntrackedRepositoryAreRejected() {
+        val (probe, sha) = setup()
+        val sub = Files.createDirectories(clone.resolve("sub"))
+        val nested = sub.resolve(".git")
+        Files.writeString(nested, "gitdir: ${temp.resolve("foreign-metadata")}\n")
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE), inspect(probe, sha))
+        Files.delete(nested)
+        Files.createSymbolicLink(nested, temp.resolve("missing-metadata"))
+        assertFalse(TrustedGitCheckoutGuard.accepts(clone))
+        Files.delete(nested)
+        Files.createDirectory(nested)
+        assertFalse(TrustedGitCheckoutGuard.accepts(clone))
+    }
+
+    @Test fun trackedGitlinkWithoutAnyNestedMetadataIsRejected() {
+        val (probe, _) = setup()
+        val sha = embeddedFilter(clone, marker)
+        val sub = clone.resolve("sub")
+        // Move only this test-owned metadata, leaving a gitlink with no .git marker.
+        Files.move(sub.resolve(".git"), temp.resolve("detached-fixture-metadata"))
+        assertFalse(Files.exists(sub.resolve(".git")))
+        assertFalse(StandaloneGitIndex.accepts(clone.resolve(".git/index")))
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE), inspect(probe, sha))
+        assertFalse(Files.exists(marker))
+    }
+
+    @Test fun unsupportedIndexVersionAndSplitIndexFailClosed() {
+        val (probe, sha) = setup()
+        val index = clone.resolve(".git/index")
+        runGit(clone, "update-index", "--index-version=4")
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE), inspect(probe, sha))
+        runGit(clone, "update-index", "--index-version=2")
+        assertTrue(StandaloneGitIndex.accepts(index))
+        runGit(clone, "update-index", "--split-index")
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE), inspect(probe, sha))
+    }
+
+    @Test fun corruptedIndexRejectedBeforeEvenAnExecutableGitCanStart() {
+        val (probe, sha) = setup()
+        val index = clone.resolve(".git/index")
+        val content = Files.readAllBytes(index)
+        content[content.lastIndex] = (content.last().toInt() xor 1).toByte()
+        Files.write(index, content)
+        val gitTrap = temp.resolve("git-trap")
+        Files.writeString(gitTrap, "#!/bin/sh\ntouch '${marker}'\nexit 42\n")
+        assertTrue(gitTrap.toFile().setExecutable(true))
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE),
+            probe.inspect(CodexNativeProbeRequest(600001, AgentRole.CODING, clone, sha, fakeCodex(), gitTrap)))
+        assertFalse(Files.exists(marker))
     }
 
     @Test fun redirectedCoreWorktreeAndExternalCommondirCannotBeTrusted() {
