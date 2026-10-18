@@ -27,6 +27,32 @@ The code does **not** auto-start any agents on startup or from GitHub polling.
    wrong SHA, dirty clone, unsupported flags and timeout. This must be
    reported as `MOCK`, never as a real Codex execution.
 
+## Optional flags-only probe on WORK
+
+An opt-in integration test in `InstalledCodexCliFlagsProbeTest` creates a **local
+disposable Git repository inside JUnit @TempDir**, registers a temporary
+PERSONAL policy/profile and checks the actual installed Codex
+`--version`/`exec --help` using Kotlin `ProcessBuilder`. It never sends a
+prompt to Codex, does not call `codex exec` without `--help`, does not need a
+GitHub write credential, and does not operate on employer repositories.
+
+For a trusted owner to invoke manually after reviewing the machine, from
+the checked-out M2 branch with Gradle 9.5 and JDK 21 available:
+
+```bash
+DEVORCH_CODEX_FLAGS_PROBE=true \
+DEVORCH_CODEX_BIN="$(command -v codex)" \
+DEVORCH_GIT_BIN="$(command -v git)" \
+gradle --no-daemon test \
+  --tests dev.orchestrator.agent.nativecli.InstalledCodexCliFlagsProbeTest
+```
+
+Expected output only proves `REAL_CODEX_CLI_FLAGS_ONLY_PASS`. Absence of the
+environment opt-in means this test is **skipped**, not PASS. The test does
+NOT prove auth/model availability, native host credential isolation, Process
+Runner safety or successful autonomous code generation. A real Coding smoke
+requires a separate authorized plan and evidence; this test is only preflight.
+
 ## Critical gates before ANY real `codex exec` on WORK
 
 - Actual installed binary location/version, `exec --help` flags and supported
