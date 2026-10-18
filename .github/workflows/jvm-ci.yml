@@ -67,7 +67,6 @@ jobs:
           DEVORCH_GITHUB_LIVE_READ: 'true'
           DEVORCH_GITHUB_LIVE_REPO: ${{ github.repository }}
           DEVORCH_GITHUB_LIVE_REPO_ID: ${{ github.repository_id }}
-          DEVORCH_GITHUB_LIVE_ISSUE: '18'
           DEVORCH_GITHUB_READ_TOKEN: ${{ github.token }}
         shell: bash
         run: |
