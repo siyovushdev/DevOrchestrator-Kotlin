@@ -15,7 +15,8 @@ Within one `BEGIN IMMEDIATE` transaction on the existing SQLite database it:
 - Reserves repository and canonical workspace, rejecting overlapping paths and
   legacy attempts without cleanup evidence. A legacy attempt conservatively
   occupies its registered root across all repository IDs; an unknown physical
-  scope denies reuse. This is repeated at STARTING. Current slice has no release API.
+  scope denies reuse. This is repeated at STARTING. The #35 Runner extension
+  releases its reservation only with a known terminal receipt; UNKNOWN retains it.
 - Saves PLANNED + context + reservation + CODING phase + event atomically.
 
 `markStarting` repeats policy/binding/workflow/workspace checks and consumes
@@ -37,7 +38,11 @@ v1/v3/v4 migration/restart tests retain pinned data. Tests for this component us
 inert mock checkout metadata and disposable SQLite; they are **offline**, not
 Coding/Review/E2E or process-cleanup evidence.
 
-Remaining M2: protected source verification, actual bounded runner/process-group
-ownership and descendant cleanup, runtime/credential attestation + specific
+The #35 [native Runner](M2-02B-NATIVE-RUNNER.md) adds trusted markRunning and
+completeObserved methods in this same journal/events schema. They persist
+process facts, release only known terminal claims and advance successful Coding
+to VERIFYING. No controller test PASS or runtime permission is inferred.
+
+Remaining M2: HOME runtime/credential attestation + specific
 Owner GO, real Coding diff/tests. Remaining M3: frozen-tree independent Review,
 bounded corrections and durable Draft publisher/read-back. No WORK/1MT and no Merge.

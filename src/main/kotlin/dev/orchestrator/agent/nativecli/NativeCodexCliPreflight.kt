@@ -226,7 +226,8 @@ internal class BoundedNativeProbeReader(
         require(maxOutputBytes in 1024..1_000_000)
     }
 
-    fun read(args: List<String>, cwd: Path, extraTrustedBinaryDirectory: Path? = null): ProbeProcessResult {
+    fun read(args: List<String>, cwd: Path, extraTrustedBinaryDirectory: Path? = null,
+             gitIndex: Path? = null): ProbeProcessResult {
         require(args.isNotEmpty() && args.size <= 20)
         val home = Files.createTempDirectory("devorch-probe-home-")
         try {
@@ -251,6 +252,10 @@ internal class BoundedNativeProbeReader(
             env["LANG"] = "C"
             env["GIT_CONFIG_NOSYSTEM"] = "1"
             env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+            if (gitIndex != null) {
+                require(gitIndex.isAbsolute && gitIndex.normalize() == gitIndex)
+                env["GIT_INDEX_FILE"] = gitIndex.toString()
+            }
             val proc = try { builder.start() } catch (_: Exception) {
                 return ProbeProcessResult.StartFailed
             }

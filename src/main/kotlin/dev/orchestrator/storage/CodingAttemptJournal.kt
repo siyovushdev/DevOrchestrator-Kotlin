@@ -29,7 +29,7 @@ internal data class CodingIntent(
 )
 
 /**
- * Initial Coding intent ONLY. No spawn, inference, scheduler or security/Owner GO provider.
+ * Coding lifecycle facts only. No spawn, inference, scheduler or security/Owner GO provider.
  * STARTING records a consumed intent, never a launch permit. A future runner must ALSO
  * validate protected source identity, runtime/credential evidence and specific Owner GO.
  */
@@ -90,6 +90,40 @@ internal class CodingAttemptJournal(database: Path) {
     }
 
     fun find(attemptId: String): CodingIntent? = db.read { read(it, attemptId) }
+
+    /** Trusted runner facts only; neither method is exposed to Issue/agent/HTTP input. */
+    fun markRunning(attemptId: String, processReceipt: String): Boolean = db.write { c ->
+        require(processReceipt.length in 1..16_384)
+        val intent = read(c,attemptId) ?: return@write false
+        val live = c.rows("SELECT 1 FROM workflows WHERE workflow_id=? AND phase='CODING' AND hold='NONE'",
+            intent.workflowId) { 1 }.isNotEmpty()
+        if (!live || c.mutate("UPDATE agent_attempts SET state='RUNNING' WHERE attempt_id=? AND state='STARTING'",
+                attemptId) != 1) return@write false
+        event(c,intent.workflowId,"CODING_PROCESS_STARTED",processReceipt,Instant.now().toString())
+        true
+    }
+
+    /** Terminal facts + phase/hold + claim release are one transaction. UNKNOWN retains claims. */
+    fun completeObserved(attemptId: String, state: AttemptState, receipt: String): Boolean = db.write { c ->
+        require(state in setOf(AttemptState.SUCCEEDED,AttemptState.FAILED,AttemptState.UNKNOWN))
+        require(receipt.length in 1..16_384)
+        val intent = read(c,attemptId) ?: return@write false
+        val prior = if (state==AttemptState.UNKNOWN) "'PLANNED','STARTING','RUNNING'" else "'STARTING','RUNNING'"
+        if (c.mutate("UPDATE agent_attempts SET state=? WHERE attempt_id=? AND state IN ($prior)",
+                state.name,attemptId) != 1) return@write false
+        val now = Instant.now().toString()
+        if (state == AttemptState.SUCCEEDED) {
+            c.mutate("""UPDATE workflows SET phase='VERIFYING',version=version+1,updated_at=?
+                WHERE workflow_id=? AND phase='CODING' AND hold='NONE'""",now,intent.workflowId)
+        } else {
+            c.mutate("""UPDATE workflows SET hold='NEEDS_OWNER',hold_reason=?,version=version+1,updated_at=?
+                WHERE workflow_id=? AND hold!='NEEDS_OWNER'""", "CODING_RUNNER_${state.name}",now,intent.workflowId)
+        }
+        if (state != AttemptState.UNKNOWN)
+            c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",attemptId)
+        event(c,intent.workflowId,"CODING_PROCESS_${state.name}",receipt,now)
+        true
+    }
 
     /** Single successful CAS. Duplicate calls/restarts never produce a second STARTING. */
     fun markStarting(attemptId: String): Boolean = db.write { conn ->
