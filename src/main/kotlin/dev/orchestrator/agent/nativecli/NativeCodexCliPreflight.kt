@@ -116,16 +116,56 @@ internal class NativeCodexCliPreflight(
         val git = requireExecutable(req.gitBinary)
             ?: return CodexProbeResult.Blocked(CodexProbeBlocker.INVALID_GIT_BINARY)
 
+        // BEFORE invoking any Git binary, reject executable filters, includes, linked
+        // common directories and externally redirected worktrees in local metadata.
+        if (!TrustedGitCheckoutGuard.accepts(dir)) {
+            return CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE)
+        }
+        val localGitDir = dir.resolve(".git")
         fun read(args: List<String>, toolBinDirectory: Path? = null) =
             processReader.read(args, dir, toolBinDirectory)
-        val head = read(listOf(git.toString(), "-C", dir.toString(),
-            "rev-parse", "--verify", "HEAD"))
+        // Force every Git command to refer to THIS exact checkout; -C alone allows
+        // local core.worktree/commondir to redirect identity and clean status.
+        val gitArgs = listOf(git.toString(), "--no-optional-locks",
+            "--git-dir=" + localGitDir, "--work-tree=" + dir)
+        val identityChecks = listOf(
+            "rev-parse" to listOf("rev-parse", "--show-toplevel"),
+            "git-dir" to listOf("rev-parse", "--absolute-git-dir"),
+            "common-dir" to listOf("rev-parse", "--path-format=absolute", "--git-common-dir"),
+        )
+        for ((identity, suffix) in identityChecks) {
+            val result = read(gitArgs + suffix)
+            if (result is ProbeProcessResult.TimedOutOrUnknown) {
+                return CodexProbeResult.Blocked(CodexProbeBlocker.PROBE_TIMEOUT_OR_UNKNOWN)
+            }
+            if (result !is ProbeProcessResult.Exited || result.exitCode != 0) {
+                return CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE)
+            }
+            val expectedPath = if (identity == "rev-parse") dir else localGitDir
+            val actualPath = try {
+                Path.of(result.output.trim()).toRealPath()
+            } catch (_: Exception) {
+                return CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE)
+            }
+            if (actualPath != expectedPath) {
+                return CodexProbeResult.Blocked(CodexProbeBlocker.UNTRUSTED_WORKSPACE)
+            }
+        }
+        val head = read(gitArgs + listOf("rev-parse", "--verify", "HEAD"))
+        if (head is ProbeProcessResult.TimedOutOrUnknown) {
+            return CodexProbeResult.Blocked(CodexProbeBlocker.PROBE_TIMEOUT_OR_UNKNOWN)
+        }
         if (head !is ProbeProcessResult.Exited || head.exitCode != 0 ||
             head.output.trim().lowercase() != expected) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.INVALID_BASE_SHA)
         }
-        val status = read(listOf(git.toString(), "--no-optional-locks", "-c", "core.fsmonitor=false",
-            "-C", dir.toString(), "status", "--porcelain=v1", "--untracked-files=all"))
+        val status = read(gitArgs + listOf(
+            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "status", "--porcelain=v1", "--untracked-files=all",
+        ))
+        if (status is ProbeProcessResult.TimedOutOrUnknown) {
+            return CodexProbeResult.Blocked(CodexProbeBlocker.PROBE_TIMEOUT_OR_UNKNOWN)
+        }
         if (status !is ProbeProcessResult.Exited || status.exitCode != 0 ||
             status.output.isNotBlank()) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.DIRTY_BASE)
