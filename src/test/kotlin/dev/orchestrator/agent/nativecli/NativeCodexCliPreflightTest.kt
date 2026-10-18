@@ -215,6 +215,45 @@ class NativeCodexCliPreflightTest {
             inspect(codex = absent))
     }
 
+    @Test fun gitHeadAndStatusTimeoutRemainUnknownThroughTopLevelInspect() {
+        setup()
+        fun hangingGit(stage: String): Path = fake("git", """
+            case "$*" in
+              *--show-toplevel*) printf '%s\n' '${worktree}' ;;
+              *--absolute-git-dir*|*--git-common-dir*)
+                  printf '%s\n' '${worktree.resolve(".git")}' ;;
+              *rev-parse*)
+                  ${if (stage == "head") "sleep 3" else "printf '%s\n' '$sha'"} ;;
+              *status*)
+                  ${if (stage == "status") "sleep 3" else ":"} ;;
+              *) exit 7 ;;
+            esac
+        """.trimIndent())
+
+        for (stage in listOf("head", "status")) {
+            val probe = NativeCodexCliPreflight(
+                db(), catalog(), BoundedNativeProbeReader(timeout = Duration.ofMillis(160))
+            )
+            val output = probe.inspect(CodexNativeProbeRequest(
+                101, AgentRole.CODING, worktree, sha, fakeCli(), hangingGit(stage),
+            ))
+            assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.PROBE_TIMEOUT_OR_UNKNOWN),
+                output, "Git $stage timeout must not be mislabeled SHA/dirty")
+        }
+    }
+
+    @Test fun deniedWorkPolicyNeverExecutesEitherProbeBinary() {
+        setup(kind = ProjectKind.WORK)
+        val markerFile = root.resolve("binary-invoked")
+        val codex = fake("codex", "touch '${markerFile}'")
+        val git = fake("git", "touch '${markerFile}'")
+        val result = NativeCodexCliPreflight(db(), catalog()).inspect(
+            CodexNativeProbeRequest(101, AgentRole.CODING, worktree, sha, codex, git)
+        )
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.WORK_FORBIDDEN), result)
+        assertFalse(Files.exists(markerFile))
+    }
+
     @Test fun timedOutProbeReturnsUnknownNotAFalseSuccess() {
         Files.createDirectories(worktree)
         val slow = fake("hang-probe", "sleep 3")
