@@ -108,18 +108,18 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
 }
 
 /** Supervised fixed-target fetch; secret is passed privately and is absent from saved launch JSON. */
-private fun fetchPersonalCheckout(token: String,issue: GitHubIssueRecord,checkout: Path,fetchArtifacts: Path,
-    permitted: (GitHubIssueRecord) -> Boolean) {
+internal fun fetchPersonalCheckout(token: String,issue: GitHubIssueRecord,checkout: Path,fetchArtifacts: Path,
+    permitted: (GitHubIssueRecord) -> Boolean, git: Path = Path.of("/usr/bin/git")) {
     val askpass=fetchArtifacts.resolve("askpass.sh")
-    Files.writeString(askpass,"#!/bin/sh\ncase \"${'$'}1\" in\n *Username*) echo x-access-token ;;\n *Password*) printf '%s\\n' \"${'$'}DEVORCH_FETCH_TOKEN\" ;;\n *) exit 1 ;;\nesac\n")
+    Files.writeString(askpass,"#!/bin/sh\ncase \"${'$'}1\" in\n *Username*) echo x-access-token ;;\n *Password*) printf '%s\\n' \"${'$'}DEVORCH_PUBLISH_TOKEN\" ;;\n *) exit 1 ;;\nesac\n")
     check(askpass.toFile().setExecutable(true,true))
     val fetched=NativeProcessRunner(Path.of("/usr/bin/python3")).run(
-        listOf("/usr/bin/git","-c","credential.helper=","-c","http.followRedirects=false","fetch","--no-tags",
+        listOf(git.toRealPath().toString(),"-c","credential.helper=","-c","http.followRedirects=false","fetch","--no-tags",
         "--no-auto-maintenance","https://github.com/${SMOKE_TARGET.fullName}.git",issue.baseSha),checkout,
         mapOf("HOME" to fetchArtifacts.toString(),"PATH" to "/usr/bin:/bin","LANG" to "C",
         "GIT_CONFIG_NOSYSTEM" to "1","GIT_CONFIG_GLOBAL" to "/dev/null","GIT_TERMINAL_PROMPT" to "0",
         "GIT_ASKPASS" to askpass.toString()),fetchArtifacts,byteArrayOf(),120000,
-        privateEnvironment=mapOf("DEVORCH_FETCH_TOKEN" to token)) { permitted(issue) }
+        privateEnvironment=mapOf("DEVORCH_PUBLISH_TOKEN" to token)) { permitted(issue) }
     check(fetched.state==AttemptState.SUCCEEDED)
 
 }
