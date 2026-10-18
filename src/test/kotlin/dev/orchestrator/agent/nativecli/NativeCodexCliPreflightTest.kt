@@ -186,6 +186,22 @@ class NativeCodexCliPreflightTest {
             inspect())
     }
 
+    @Test fun tooMuchProbeOutputIsBlockedWithoutFillingTheDisk() {
+        Files.createDirectories(worktree)
+        val flood = fake("flood-probe", "head -c 100000 /dev/zero")
+        val result = BoundedNativeProbeReader(maxOutputBytes = 1024).read(
+            listOf(flood.toString(), "--help"), worktree,
+        )
+        assertIs<ProbeProcessResult.OutputTooLarge>(result)
+    }
+
+    @Test fun untrustedOrMissingBinaryCannotPassPreflight() {
+        setup()
+        val absent = root.resolve("absent-codex")
+        assertEquals(CodexProbeResult.Blocked(CodexProbeBlocker.INVALID_CLI_BINARY),
+            inspect(codex = absent))
+    }
+
     @Test fun timedOutProbeReturnsUnknownNotAFalseSuccess() {
         Files.createDirectories(worktree)
         val slow = fake("hang-probe", "sleep 3")
