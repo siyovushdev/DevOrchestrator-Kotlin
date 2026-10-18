@@ -1,13 +1,13 @@
 # GitHub: состояние и правила репозитория
 
-**Статус:** M0 / документация. **Репозиторий:** `siyovushdev/DevOrchestrator-Kotlin` — Private, default branch `main`.
+**Статус:** исторический документ первоначального M0 setup (2026-10-17), **не актуальный roadmap**. Текущий прогресс — [README](../README.md), [Backlog](BACKLOG.md), [Issue #22](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/22). **Репозиторий:** `siyovushdev/DevOrchestrator-Kotlin` — Private, default branch `main`.
 
 ## Зафиксировано
 
 - Исходный README заменён индексом проекта и решениями.
 - [ADR-001](adr/ADR-001-project-registry.md) и [ADR-002](adr/ADR-002-lifecycle-DRAFT.md) (R-01–R-06) — утверждённые архитектурные решения.
-- [PRD](PRD.md), [Architecture](ARCHITECTURE.md), [Roadmap](ROADMAP.md), [Backlog](BACKLOG.md) — DRAFT. ADR-003/004/005 — ещё не согласованы.
-- В GitHub открыты шесть M0 Issues для согласования проекта; M1–M6 не запускаются.
+- На момент первого setup документы были DRAFT. **Сейчас PRD, Architecture, Roadmap и ADR-003/004/005 утверждены для Native PERSONAL MVP**. Решение Native CLI S-04 заменило раннюю Docker/microVM стратегию для первого тестового MVP.
+- Шесть M0 Issues утверждены/закрыты. Приняты M1-01/02/03/04/06; начат M2-01 (только preflight в Draft PR #23). Реальная агентная цепочка и WORK запуск **NOT_RUN**.
 - Добавлены шаблоны Issues и PR.
 
 ## Политика изменений
