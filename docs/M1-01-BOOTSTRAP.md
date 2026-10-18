@@ -1,6 +1,6 @@
 # M1-01 — Kotlin/JVM + Ktor bootstrap
 
-**Status:** Draft PR #9. The real Kotlin agent workflow is not implemented or executed.
+**Status:** Historical M1-01 acceptance record — PR #9 **MERGED**. This document describes only the initial Ktor bootstrap, not the current milestone. Current stage: [M2-01 Issue #22](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/22), Codex preflight in Draft PR #23. Real Coding/Review E2E **NOT_RUN**.
 
 ## Scope
 - Kotlin 2.4.21, Java 21, Ktor 3.5.2, Gradle 9.5.0 for CI.
@@ -39,10 +39,10 @@ distribution checksum and standard Gradle invocation (or verify an installed
 compatible Gradle). Do not create a custom downloader.
 
 ## Acceptance boundaries
-- [ ] Current PR head: CI build, unit tests and running-server HTTP smoke PASS.
-- [ ] Source/diff and workflow reviewed.
+- [x] M1-01 PR #9 merged after CI build, unit tests and running-server HTTP smoke PASS.
+- [x] M1-01 source/diff and workflow reviewed in its original acceptance.
 - [ ] Standard Gradle Wrapper or compatible workstation Gradle confirmed.
-- [ ] Owner approves Merge separately.
+- [x] Owner accepted and merged M1-01 PR #9 (historical). New PRs still require their own acceptance.
 
 **NOT_TESTED:** real `codex exec` on WORK, agent permissions, SQLite and GitHub
 publication. Those belong to M2/M3 and need a separate credential preflight
