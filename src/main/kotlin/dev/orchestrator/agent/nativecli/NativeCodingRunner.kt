@@ -41,6 +41,7 @@ internal class NativeCodingRunner(
     private val timeout: Duration = Duration.ofSeconds(120),
     private val outputLimit: Int = 1_048_576,
     private val proxyPort: Int = 10809,
+    private val ownerGo: () -> Boolean = { true },
 ) {
     private val store = SqliteTaskStore(database)
     private val journal = CodingAttemptJournal(database)
@@ -55,7 +56,7 @@ internal class NativeCodingRunner(
 
     fun run(attemptId: String): CodingRunResult {
         val intent = journal.find(attemptId) ?: return CodingRunResult(null,"NO_INTENT")
-        if (intent.repositoryId != repositoryId || intent.issueNumber != 1 || intent.state != AttemptState.PLANNED)
+        if (intent.repositoryId != repositoryId || intent.state != AttemptState.PLANNED)
             return CodingRunResult(null,"WRONG_SCOPE_OR_ALREADY_CONSUMED")
         val policy = store.findPolicy(repositoryId) ?: return CodingRunResult(null,"NO_POLICY")
         val workflow = store.findWorkflow(repositoryId,intent.issueNumber) ?: return CodingRunResult(null,"NO_WORKFLOW")
@@ -112,7 +113,7 @@ internal class NativeCodingRunner(
         val prompt = ("Implement only the pinned Issue below in this disposable PERSONAL checkout. " +
             "Do not publish, access credentials or change Git metadata. Run its offline tests.\n" +
             "Issue #${intent.issueNumber}: ${issue.title}\n${issue.body}\nCorrection feedback: $feedback\n").toByteArray(Charsets.UTF_8)
-        if (!journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
+        if (!ownerGo() || !journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
 
         fun complete(state: AttemptState, reason: String, evidence: Any? = null, tree: String? = null): CodingRunResult {
             val receipt = mapper.writeValueAsString(mapOf("attempt_id" to attemptId,"reason" to reason,
@@ -130,7 +131,7 @@ internal class NativeCodingRunner(
         }
         val observation = NativeProcessRunner(python,outputLimit).run(command.argumentVector,intent.workspace,
             childEnv,artifacts,prompt,limitMs,lastMessage) { birth ->
-            journal.markRunning(attemptId,mapper.writeValueAsString(mapOf("attempt_id" to attemptId,
+            ownerGo() && journal.markRunning(attemptId,mapper.writeValueAsString(mapOf("attempt_id" to attemptId,
                 "identity" to birth,"cli_binary" to codex.toRealPath().toString(),
                 "profile_id" to intent.profileId,"profile_version" to intent.profileVersion)))
         }

@@ -1,0 +1,16 @@
+# Owner-managed file OUTSIDE every checkout/agentHome. chmod 600 before use.
+# Copy/change on HOME only after a separate Owner decision. Nothing is enabled by this example.
+enabled=false
+repository=siyovushdev/devorch-kotlin-e2e-smoke
+repositoryId=1424152600
+owner=siyovushdev
+# Existing canonical directories; state root must be owned by the service user, mode 700.
+# Keep controller state and agent credentials in separate sibling directories.
+root=/home/devorch-e2e/personal-service/state
+agentHome=/home/devorch-e2e/personal-service/agent-home
+codex=/home/devorch-e2e/.local/bin/codex
+# Owner must choose a model available to the installed CLI/account.
+model=OWNER_MUST_SELECT
+minimumTests=1
+proxyPort=10809
+pollSeconds=90

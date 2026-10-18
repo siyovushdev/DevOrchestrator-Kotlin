@@ -41,6 +41,7 @@ internal class WorkflowEngine(
     private val git: Path = Path.of("/usr/bin/git"),
     private val python: Path = Path.of("/usr/bin/python3"),
     private val proxyPort: Int = 10809,
+    private val ownerGo: () -> Boolean = { true },
 ) {
     private val store = SqliteTaskStore(database)
     private val db = RuntimeDatabase(database)
@@ -57,7 +58,7 @@ internal class WorkflowEngine(
     /** One persisted action per call. Repeated terminal/pending calls do not launch twice. */
     fun step(issueNumber: Int = 1): String {
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
-        if (w.hold!=WorkflowHold.NONE) return "NEEDS_OWNER"
+        if (w.hold!=WorkflowHold.NONE || !ownerGo()) return "NEEDS_OWNER"
         return when (w.phase) {
             WorkflowPhase.VERIFYING -> verifyCompletedCoding(issueNumber)
             WorkflowPhase.REVIEWING -> launchReview(issueNumber)
@@ -71,7 +72,7 @@ internal class WorkflowEngine(
             WorkflowPhase.CODING -> {
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
-                    proxyPort=proxyPort).run(intent.attemptId).reason
+                    proxyPort=proxyPort,ownerGo=ownerGo).run(intent.attemptId).reason
             }
             else -> w.phase.name
         }
@@ -85,7 +86,7 @@ internal class WorkflowEngine(
     fun verifyCompletedCoding(issueNumber: Int = 1): String {
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
         val intent = latestCoding(w.id) ?: return "NO_CODING"
-        if (w.phase!=WorkflowPhase.VERIFYING || w.hold!=WorkflowHold.NONE ||
+        if (!ownerGo() || w.phase!=WorkflowPhase.VERIFYING || w.hold!=WorkflowHold.NONE ||
             intent.state!=AttemptState.SUCCEEDED || intent.generation!=w.correctionsUsed) return "GUARD_DENIED"
         val policy = store.findPolicy(repositoryId) ?: return "NO_POLICY"
         if (!localPaths(policy.workspaceRoot) || policy.kind!=ProjectKind.PERSONAL ||
@@ -130,9 +131,10 @@ internal class WorkflowEngine(
             val command = listOf(python.toRealPath().toString(),"-I","-B",script.toString(),
                 pending.filesDirectory.toString(),report.toString(),required.toString())
             val harnessSha256 = sha256(boundedFile(script,65536))
+            check(ownerGo())
             val observed = NativeProcessRunner(python).run(command,pending.filesDirectory,environment,
                 artifacts,byteArrayOf(),timeout.toMillis()) { birth ->
-                db.write { c -> event(c,w.id,"VERIFICATION_PROCESS_STARTED",mapper.writeValueAsString(birth)); true }
+                db.write { c -> event(c,w.id,"VERIFICATION_PROCESS_STARTED",mapper.writeValueAsString(birth)); ownerGo() }
             }
             if (observed.state==AttemptState.UNKNOWN || !pending.isIntact())
                 return verificationUnknown(w,"VERIFICATION_PROCESS_OR_TREE_UNKNOWN")
@@ -174,7 +176,7 @@ internal class WorkflowEngine(
 
     fun launchReview(issueNumber: Int = 1): String {
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
-        if (w.phase!=WorkflowPhase.REVIEWING || w.hold!=WorkflowHold.NONE) return "GUARD_DENIED"
+        if (!ownerGo() || w.phase!=WorkflowPhase.REVIEWING || w.hold!=WorkflowHold.NONE) return "GUARD_DENIED"
         val verified = verification(w.id,w.correctionsUsed) ?: return "NO_VERIFICATION"
         val intent = coding.find(verified.codingAttemptId) ?: return "NO_CODING"
         val assigned = catalog.findAssignedProfile(repositoryId,AgentRole.REVIEW) ?: return "NO_REVIEW_PROFILE"
@@ -222,11 +224,12 @@ Controller verification: ${verified.testsRun} tests, PASS.
 Return only JSON: {"verdict":"PASS or CHANGES_REQUIRED","candidate_id":"${candidate.candidateId}","manifest_sha256":"${candidate.manifestSha256}","candidate_tree":"${verified.candidateTree}","generation":${w.correctionsUsed},"findings":[]}
 CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have no findings.
 """.toByteArray()
+            check(ownerGo())
             val observed = NativeProcessRunner(python).run(command.argumentVector.dropLast(1)+listOf("--skip-git-repo-check","-"),
                 copy.filesDirectory,reviewEnvironment(),artifacts,prompt,
                 minOf(timeout.toMillis(),assigned.profile.timeoutSeconds*1000L),last) { birth ->
                 db.write { c ->
-                    if (!currentAfterAction(c,w,WorkflowPhase.REVIEWING) || !policyCurrent(c,policy.version) ||
+                    if (!ownerGo() || !currentAfterAction(c,w,WorkflowPhase.REVIEWING) || !policyCurrent(c,policy.version) ||
                         catalog.findAssignedProfile(c,repositoryId,AgentRole.REVIEW)!=assigned) return@write false
                     check(c.mutate("UPDATE agent_attempts SET state='RUNNING' WHERE attempt_id=? AND state='STARTING'",id)==1)
                     event(c,w.id,"REVIEW_PROCESS_STARTED",mapper.writeValueAsString(birth)); true
@@ -259,7 +262,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
                     "model" to assigned.profile.model,"effort" to assigned.profile.effort.name,
                     "estimated_budget_micro_usd" to assigned.profile.maxBudgetMicroUsd,"monetary_cap_enforced" to false))
                 event(c,w.id,"REVIEW_COMPLETED",detail)
-                if (!currentAfterAction(c,w,WorkflowPhase.REVIEWING) || !policyCurrent(c,policy.version) ||
+                if (!ownerGo() || !currentAfterAction(c,w,WorkflowPhase.REVIEWING) || !policyCurrent(c,policy.version) ||
                     !quiet(c,w.id,intent.workspace)) hold(c,w.id,"REVIEW_STATE_OR_RESOURCE_CHANGED")
                 else when (disposition) {
                     ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS -> phase(c,w.id,WorkflowPhase.READY_FOR_PR)

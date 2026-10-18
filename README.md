@@ -39,3 +39,12 @@ DevOrchestrator — собственная платформа управлени
 6. Старый Python DevOrchestrator остаётся отдельным историческим проектом, не является кодовой базой новой версии.
 
 **Текущий шаг:** [Issue #7 — M1-01 Kotlin + Ktor bootstrap](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/7). Реальная команда `codex exec` и проверка доступных credentials на WORK нужны до включения agent execution. Старый Python DevOrchestrator не меняется.
+
+### M4 PERSONAL service (Draft, OFF by default)
+
+[ChatGPT → GitHub → autonomous PERSONAL workflow](docs/M4-01-PERSONAL-SERVICE.md)
+adds an explicit `service` entry point over the verified #40 pipeline. One worker,
+per-Issue saved state, bounded correction and one Draft PR; uncertain actions stop
+without replay. [Owner configuration](config/personal.properties.example) starts OFF;
+[user-unit example](packaging/devorch-personal.service.example) is not installed/enabled.
+Live unattended acceptance and HOME activation require separate Owner permission.

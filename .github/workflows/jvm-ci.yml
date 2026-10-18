@@ -23,6 +23,23 @@ jobs:
           gradle-version: '9.5.0'
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
+      - name: PERSONAL distribution stays OFF without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          pilot_root=$(mktemp -d)
+          trap 'rm -rf "$pilot_root"' EXIT
+          mkdir -m 700 "$pilot_root/state" "$pilot_root/agent-home"
+          sed -e "s|^root=.*|root=$pilot_root/state|" \
+              -e "s|^agentHome=.*|agentHome=$pilot_root/agent-home|" \
+              config/personal.properties.example > "$pilot_root/personal.properties"
+          chmod 600 "$pilot_root/personal.properties"
+          app=./build/install/dev-orchestrator-kotlin/bin/dev-orchestrator-kotlin
+          "$app" service "$pilot_root/personal.properties" | tee "$pilot_root/off.log"
+          grep -Fx 'PERSONAL autonomy OFF' "$pilot_root/off.log"
+          "$app" status "$pilot_root/personal.properties" | grep -Fx 'No tasks'
+          test ! -e "$pilot_root/state/service.db"
+          echo PERSONAL_AUTONOMY_OFF_SMOKE_PASS
       - name: Running-server smoke test
         shell: bash
         run: |
