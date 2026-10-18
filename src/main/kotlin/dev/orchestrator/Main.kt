@@ -17,7 +17,11 @@ fun Application.module() {
     }
 }
 
-fun main() {
+fun main(args: Array<String>) {
+    if (args.isNotEmpty()) {
+        dev.orchestrator.service.serviceCommand(args)
+        return
+    }
     val port = System.getenv("DEVORCH_PORT")
         ?.toIntOrNull()
         ?.takeIf { it in 1..65535 }

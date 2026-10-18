@@ -23,6 +23,7 @@ internal class DraftPrPublisher(
     private val push: PublicationPush,
     private val ownerGo: (PublicationPlan,EffectKind) -> Boolean,
     private val git: Path = Path.of("/usr/bin/git"),
+    private val issueNumber: Int = 1,
 ) {
     private val store=SqliteTaskStore(database)
     private val db=RuntimeDatabase(database)
@@ -33,10 +34,10 @@ internal class DraftPrPublisher(
     private val target=SMOKE_TARGET
     private data class Evidence(val w: WorkflowSnapshot, val candidate: FrozenCandidate,
         val coding: CodingIntent, val reviewer: String)
-    init { require(expectedBase.matches(Regex("[0-9a-f]{40}"))) }
+    init { require(issueNumber>0); require(expectedBase.matches(Regex("[0-9a-f]{40}"))) }
 
     fun publish(): PublicationResult {
-        val w=store.findWorkflow(target.repositoryId,1) ?: return PublicationResult("NO_WORKFLOW")
+        val w=store.findWorkflow(target.repositoryId,issueNumber) ?: return PublicationResult("NO_WORKFLOW")
         if (w.hold!=WorkflowHold.NONE) return PublicationResult("NEEDS_OWNER")
         if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return PublicationResult("ALREADY_CONFIRMED",confirmedUrl(w.id))
         var active: EffectKind?=null
@@ -49,14 +50,14 @@ internal class DraftPrPublisher(
                 stage(evidence,dir)
                 val candidate=evidence.candidate
                 val content=commitBytes(candidate.binding.candidateTree,w.id,candidate.candidateId,candidate.manifestSha256)
-                plan=PublicationPlan(w.id,target.repositoryId,1,target.owner,target.name,"main",expectedBase,
+                plan=PublicationPlan(w.id,target.repositoryId,issueNumber,target.owner,target.name,"main",expectedBase,
                     objectId(content),candidate.binding.candidateTree,candidate.manifestSha256,candidate.candidateId,
                     evidence.coding.attemptId,evidence.reviewer,w.correctionsUsed,evidence.coding.policyVersion,w.version)
                 Files.write(dir.resolve("commit.txt"),content,CREATE_NEW)
                 check(journal.prepare(plan))
             }
             assertPlan(plan,loadEvidence())
-            if (store.findWorkflow(target.repositoryId,1)!!.phase==WorkflowPhase.READY_FOR_PR)
+            if (store.findWorkflow(target.repositoryId,issueNumber)!!.phase==WorkflowPhase.READY_FOR_PR)
                 check(journal.beginPublishing(plan))
             for (kind in EffectKind.entries) {
                 when (journal.state(plan.workflowId,kind)) {
@@ -115,7 +116,7 @@ internal class DraftPrPublisher(
 
     /** Read-only effect reconciliation; even a matching receipt leaves NEEDS_OWNER intact. */
     fun reconcile(kind: EffectKind): Boolean = try {
-        val w=store.findWorkflow(target.repositoryId,1)!!
+        val w=store.findWorkflow(target.repositoryId,issueNumber)!!
         val plan=journal.findPlan(w.id)!!
         check(journal.state(w.id,kind)==EffectState.UNCERTAIN)
         assertPlan(plan,loadEvidence(allowHold=true)); api.checkBase(plan)
@@ -146,7 +147,7 @@ internal class DraftPrPublisher(
     private fun assertPlan(plan: PublicationPlan,e: Evidence) {
         val b=e.candidate.binding
         check(plan.repositoryId==target.repositoryId && plan.owner==target.owner && plan.repository==target.name &&
-            plan.issueNumber==1 && plan.baseBranch=="main" && plan.baseSha==expectedBase && plan.workflowId==e.w.id &&
+            plan.issueNumber==issueNumber && plan.baseBranch=="main" && plan.baseSha==expectedBase && plan.workflowId==e.w.id &&
             plan.candidateTree==b.candidateTree && plan.candidateManifestSha256==e.candidate.manifestSha256 &&
             plan.candidateId==e.candidate.candidateId && plan.codingAttemptId==e.coding.attemptId &&
             plan.reviewerAttemptId==e.reviewer && plan.generation==e.w.correctionsUsed &&
@@ -156,13 +157,13 @@ internal class DraftPrPublisher(
     }
 
     private fun loadEvidence(allowHold: Boolean=false): Evidence {
-        val w=store.findWorkflow(target.repositoryId,1)!!
+        val w=store.findWorkflow(target.repositoryId,issueNumber)!!
         check(w.phase in setOf(WorkflowPhase.READY_FOR_PR,WorkflowPhase.PUBLISHING) && (allowHold || w.hold==WorkflowHold.NONE))
         val policy=store.findPolicy(target.repositoryId)!!
         check(policy.kind==ProjectKind.PERSONAL && policy.personalAutoExecution)
         canonical(policy.workspaceRoot); canonical(publisherRoot)
         check(publisherRoot.startsWith(policy.workspaceRoot) && publisherRoot!=policy.workspaceRoot)
-        val issue=store.findPinnedGitHubIssue(target.repositoryId,1)!!
+        val issue=store.findPinnedGitHubIssue(target.repositoryId,issueNumber)!!
         check(issue.workflowId==w.id && issue.baseSha==expectedBase)
         val raw=db.read { c -> c.rows("SELECT evidence FROM workflow_verifications WHERE workflow_id=? AND generation=? AND state='SUCCEEDED'",
             w.id,w.correctionsUsed) { mapper.readTree(it.getString(1)) }.single() }
@@ -172,7 +173,7 @@ internal class DraftPrPublisher(
             listOf("failures","errors","unexpectedSuccesses").all { raw.path(it).isInt && raw.path(it).asInt()==0 })
         clean(raw.path("process"))
         val intent=coding.find(raw.path("codingAttemptId").asText())!!
-        check(intent.workflowId==w.id && intent.repositoryId==target.repositoryId && intent.issueNumber==1 &&
+        check(intent.workflowId==w.id && intent.repositoryId==target.repositoryId && intent.issueNumber==issueNumber &&
             intent.state==AttemptState.SUCCEEDED && intent.generation==w.correctionsUsed && intent.baseSha==expectedBase &&
             intent.issueBodySha256==issue.bodySha256 && intent.policyVersion==policy.version)
         db.read { c -> check(c.rows("""SELECT 1 FROM workflow_verifications WHERE workflow_id=? AND generation=?
@@ -223,10 +224,10 @@ internal class DraftPrPublisher(
                 JOIN attempt_contexts x ON x.attempt_id=a.attempt_id WHERE r.attempt_id=? AND r.workflow_id=? AND r.generation=?
                 AND r.candidate_id=? AND r.manifest_sha256=? AND r.candidate_tree=? AND r.candidate_directory=? AND r.coding_session_id=?
                 AND a.role='REVIEW' AND a.state='SUCCEEDED' AND a.source_tree=? AND a.workflow_id=r.workflow_id AND a.generation=r.generation
-                AND x.base_sha=? AND x.issue_body_sha256=? AND x.issue_number=1 AND x.policy_version=? AND x.repository_id=?
+                AND x.base_sha=? AND x.issue_body_sha256=? AND x.issue_number=? AND x.policy_version=? AND x.repository_id=?
                 AND x.profile_id=? AND x.profile_version=? AND x.assignment_version=? AND x.manifest_version=?""",
                 receipt.reviewerAttemptId,w.id,w.correctionsUsed,candidate.candidateId,candidate.manifestSha256,b.candidateTree,
-                candidate.directory.toString(),b.codingSessionId,b.candidateTree,expectedBase,intent.issueBodySha256,policy.version,target.repositoryId,
+                candidate.directory.toString(),b.codingSessionId,b.candidateTree,expectedBase,intent.issueBodySha256,issueNumber,policy.version,target.repositoryId,
                 review.path("profile_id").asText(),review.path("profile_version").asLong(),review.path("assignment_version").asLong(),
                 review.path("manifest_version").asLong()) { 1 }.size==1)
             // Same minimal protected-controller resource contract as the engine; own
@@ -325,7 +326,7 @@ internal class DraftPrPublisher(
     private fun commitBytes(tree: String,workflow: String,candidate: String,manifest: String): ByteArray =
         ("tree $tree\nparent $expectedBase\nauthor DevOrchestrator <devorchestrator@users.noreply.github.com> 0 +0000\n"+
             "committer DevOrchestrator <devorchestrator@users.noreply.github.com> 0 +0000\n\n"+
-            "Implement Issue #1\n\nWorkflow: $workflow\nCandidate: $candidate\nManifest: $manifest\n").toByteArray(Charsets.UTF_8)
+            "Implement Issue #$issueNumber\n\nWorkflow: $workflow\nCandidate: $candidate\nManifest: $manifest\n").toByteArray(Charsets.UTF_8)
     private fun objectId(bytes: ByteArray): String = MessageDigest.getInstance("SHA-1")
         .digest("commit ${bytes.size}\u0000".toByteArray()+bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun canonical(p: Path) { check(p.isAbsolute && p.normalize()==p && p.toRealPath()==p && Files.isDirectory(p,NOFOLLOW_LINKS)) }
