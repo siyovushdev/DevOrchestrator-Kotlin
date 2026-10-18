@@ -1,6 +1,31 @@
 package dev.orchestrator.storage
 
 internal object RuntimeSchema {
+    val v6 = listOf(
+        """CREATE TABLE publication_plans(
+            workflow_id TEXT PRIMARY KEY NOT NULL REFERENCES workflows(workflow_id),
+            repository_id INTEGER NOT NULL UNIQUE REFERENCES projects(repository_id),
+            plan_json TEXT NOT NULL CHECK(length(plan_json)<=8192)
+        )""",
+        """CREATE TABLE publication_receipts(
+            effect_id TEXT PRIMARY KEY NOT NULL REFERENCES effects_outbox(effect_id),
+            evidence TEXT NOT NULL CHECK(length(evidence)<=8192),
+            recorded_at TEXT NOT NULL
+        )""",
+        """CREATE TRIGGER immutable_publication_plan_update BEFORE UPDATE ON publication_plans
+            BEGIN SELECT RAISE(ABORT,'immutable publication plan'); END""",
+        """CREATE TRIGGER immutable_publication_plan_delete BEFORE DELETE ON publication_plans
+            BEGIN SELECT RAISE(ABORT,'immutable publication plan'); END""",
+        """CREATE TRIGGER immutable_publication_receipt_update BEFORE UPDATE ON publication_receipts
+            BEGIN SELECT RAISE(ABORT,'immutable publication receipt'); END""",
+        """CREATE TRIGGER immutable_publication_receipt_delete BEFORE DELETE ON publication_receipts
+            BEGIN SELECT RAISE(ABORT,'immutable publication receipt'); END""",
+        """CREATE TRIGGER immutable_publication_effect_identity
+            BEFORE UPDATE OF workflow_id,kind,idempotency_key,intended_target,expected_sha ON effects_outbox
+            WHEN EXISTS (SELECT 1 FROM publication_plans WHERE workflow_id=OLD.workflow_id)
+            BEGIN SELECT RAISE(ABORT,'immutable publication effect identity'); END""",
+    )
+
     val v5 = listOf(
         """
         CREATE TABLE attempt_contexts(

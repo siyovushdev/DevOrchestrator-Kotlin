@@ -202,12 +202,15 @@ class CodingAttemptJournalTest {
         val (store,clone) = setup()
         val source = store.findPinnedGitHubIssue(1,1)
         DriverManager.getConnection("jdbc:sqlite:$database").use { c -> c.createStatement().use {
+            it.execute("DROP TABLE publication_receipts")
+            it.execute("DROP TABLE publication_plans")
+            it.execute("DROP TRIGGER immutable_publication_effect_identity")
             it.execute("DROP TABLE runtime_reservations")
             it.execute("DROP TABLE attempt_contexts")
             it.execute("DROP TRIGGER immutable_runtime_attempt_input")
             it.execute("PRAGMA user_version=4")
         } }
-        assertEquals(5,SqliteTaskStore(database).schemaVersion())
+        assertEquals(6,SqliteTaskStore(database).schemaVersion())
         assertEquals(source,store.findPinnedGitHubIssue(1,1))
         assertNotNull(CodingAttemptJournal(database).plan(1,1,0,"immutable",clone,tree))
         DriverManager.getConnection("jdbc:sqlite:$database").use { c ->
