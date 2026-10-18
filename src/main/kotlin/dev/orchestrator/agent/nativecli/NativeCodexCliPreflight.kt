@@ -123,8 +123,8 @@ class NativeCodexCliPreflight(
             head.output.trim().lowercase() != expected) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.INVALID_BASE_SHA)
         }
-        val status = read(listOf(git.toString(), "--no-optional-locks", "-C", dir.toString(),
-            "status", "--porcelain=v1", "--untracked-files=all"))
+        val status = read(listOf(git.toString(), "--no-optional-locks", "-c", "core.fsmonitor=false",
+            "-C", dir.toString(), "status", "--porcelain=v1", "--untracked-files=all"))
         if (status !is ProbeProcessResult.Exited || status.exitCode != 0 ||
             status.output.isNotBlank()) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.DIRTY_BASE)
@@ -187,44 +187,70 @@ class BoundedNativeProbeReader(
 
     fun read(args: List<String>, cwd: Path): ProbeProcessResult {
         require(args.isNotEmpty() && args.size <= 20)
-        val output = Files.createTempFile("devorch-probe-", ".log")
         val home = Files.createTempDirectory("devorch-probe-home-")
         try {
             val builder = ProcessBuilder(args)
                 .directory(cwd.toFile())
                 .redirectErrorStream(true)
-                .redirectOutput(output.toFile())
             val env = builder.environment()
             env.clear()
-            // Include only trusted binary directory, never the caller's arbitrary PATH.
+            // Include only trusted binary directory, never arbitrary user/Issue PATH.
             val binaryParent = Path.of(args.first()).parent?.toString() ?: ""
             env["PATH"] = "$binaryParent:/usr/bin:/bin"
             env["HOME"] = home.toString()
             env["LANG"] = "C"
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+            env["GIT_CONFIG_GLOBAL"] = "/dev/null"
             val proc = try { builder.start() } catch (_: Exception) {
                 return ProbeProcessResult.StartFailed
             }
             proc.outputStream.close()
+            val captured = java.io.ByteArrayOutputStream()
+            val oversized = java.util.concurrent.atomic.AtomicBoolean(false)
+            val drain = Thread({
+                try {
+                    proc.inputStream.use { stream ->
+                        val chunk = ByteArray(4096)
+                        while (true) {
+                            val size = stream.read(chunk)
+                            if (size < 0) break
+                            if (captured.size().toLong() + size > maxOutputBytes) {
+                                oversized.set(true)
+                                proc.destroyForcibly()
+                                break
+                            }
+                            captured.write(chunk, 0, size)
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Interrupted/broken pipe is not proof of process completion.
+                }
+            }, "devorch-bounded-probe-reader")
+            drain.isDaemon = true
+            drain.start()
             val finished = try {
                 proc.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 false
             }
-            if (!finished) {
+            if (!finished || oversized.get()) {
                 try { proc.toHandle().descendants().forEach { it.destroyForcibly() } }
                 catch (_: Exception) { }
                 proc.destroyForcibly()
                 try { proc.waitFor(2, TimeUnit.SECONDS) }
                 catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-                return ProbeProcessResult.TimedOutOrUnknown
             }
-            if (Files.size(output) > maxOutputBytes) return ProbeProcessResult.OutputTooLarge
-            return ProbeProcessResult.Exited(proc.exitValue(), Files.readString(output))
+            try { drain.join(2_000) }
+            catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            if (!finished || drain.isAlive) return ProbeProcessResult.TimedOutOrUnknown
+            if (oversized.get()) return ProbeProcessResult.OutputTooLarge
+            return ProbeProcessResult.Exited(
+                proc.exitValue(), captured.toString(java.nio.charset.StandardCharsets.UTF_8),
+            )
         } finally {
-            Files.deleteIfExists(output)
-            // A CLI that unexpectedly writes to HOME is not declared safe by this probe.
-            // Never recursively delete an unknown directory tree here.
+            // Probe output is never written to a persistent log or Git workspace.
+            // A malicious CLI might populate HOME; do not recursively delete unknown files.
             try { Files.deleteIfExists(home) } catch (_: Exception) { }
         }
     }
