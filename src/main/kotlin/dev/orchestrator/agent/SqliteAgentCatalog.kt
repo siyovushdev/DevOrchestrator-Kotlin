@@ -278,18 +278,21 @@ class SqliteAgentCatalog(databasePath: Path) {
 
     /** Read-only pinned snapshot, never a command to launch. */
     fun findAssignedProfile(repositoryId: Long, role: AgentRole): AssignedAgentProfile? =
-        connection().use { conn ->
-            val assigned = readAssignment(conn, repositoryId, role) ?: return@use null
-            // All referenced versions are immutable. No cross-project role mapping accepted.
-            val profile = readProfile(conn, assigned.profileId, assigned.profileVersion)
-                ?: throw IllegalStateException("Missing immutable profile revision")
-            require(profile.repositoryId == repositoryId && profile.role == role)
-            val manifest = readManifest(conn, profile.adapterId, profile.manifestVersion)
-                ?: throw IllegalStateException("Missing immutable manifest revision")
-            AgentProfileCompatibility.validateDeclared(manifest, profile,
-                requireNotNull(projectKind(conn, repositoryId)))
-            AssignedAgentProfile(assigned, profile, manifest)
-        }
+        connection().use { conn -> findAssignedProfile(conn, repositoryId, role) }
+
+    /** Shares the intent transaction's read snapshot and SQLite writer reservation. */
+    internal fun findAssignedProfile(conn: Connection, repositoryId: Long, role: AgentRole): AssignedAgentProfile? {
+        val assigned = readAssignment(conn, repositoryId, role) ?: return null
+        // All referenced versions are immutable. No cross-project role mapping accepted.
+        val profile = readProfile(conn, assigned.profileId, assigned.profileVersion)
+            ?: throw IllegalStateException("Missing immutable profile revision")
+        require(profile.repositoryId == repositoryId && profile.role == role)
+        val manifest = readManifest(conn, profile.adapterId, profile.manifestVersion)
+            ?: throw IllegalStateException("Missing immutable manifest revision")
+        AgentProfileCompatibility.validateDeclared(manifest, profile,
+            requireNotNull(projectKind(conn, repositoryId)))
+        return AssignedAgentProfile(assigned, profile, manifest)
+    }
 
     fun listConfigAudit(): List<AgentConfigAudit> = connection().use { conn ->
         conn.createStatement().use {
