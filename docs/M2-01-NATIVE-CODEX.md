@@ -8,14 +8,18 @@ The code does **not** auto-start any agents on startup or from GitHub polling.
 1. `NativeCodexCliPreflight` checks trusted SQLite Project Registry:
    stable repository ID, PERSONAL with explicit execution opt-in, exact project
    role/profile snapshot from Agent Catalog, and no WORK access.
-2. The first executable profile is confined to a **disposable standalone clone**:
-   normalized absolute workspace below registered root, no symlink/realpath
-   escape, and an ordinary `.git` directory (linked worktree disallowed for
-   this first smoke).
-3. Read-only probes through `ProcessBuilder` verify `git rev-parse HEAD` is
-   the expected 40-digit source SHA, `git status --porcelain` is clean,
-   `codex --version` executes, and `codex exec --help` advertises necessary
-   non-interactive flags. Timeouts are **UNKNOWN**, not silent PASS/retry.
+2. The flags-only probe accepts a **minimal standalone disposable clone**:
+   canonical workspace below registered root, ordinary `.git`, strict local
+   `config` allowlist, no `include`/`filter`/`core.worktree`, external
+   `commondir`, symlinked Git metadata, custom attributes filter or submodules.
+   `TrustedGitCheckoutGuard` scans these BEFORE calling any Git binary.
+   Unknown layouts are **DENY**, not auto-fixed.
+3. Git commands explicitly bind `--git-dir` and `--work-tree` to the approved
+   checkout and check the effective toplevel/git-dir/common-dir before comparing
+   the pinned HEAD SHA and clean status. Runtime `core.fsmonitor` and hooks are
+   disabled. `codex --version` and `codex exec --help` only check flags.
+   Git and CLI timeouts retain **UNKNOWN** at the top-level result, not
+   `INVALID_BASE_SHA` or `DIRTY_BASE`.
 4. `CodexExecCommandPlanner` builds an argument **list**, not a shell command,
    with `--sandbox workspace-write` only for CODING and `read-only` only
    for REVIEW. Effort/model and immutable profile revision are explicit.
@@ -52,6 +56,17 @@ environment opt-in means this test is **skipped**, not PASS. The test does
 NOT prove auth/model availability, native host credential isolation, Process
 Runner safety or successful autonomous code generation. A real Coding smoke
 requires a separate authorized plan and evidence; this test is only preflight.
+
+- Regression tests include disposable **real Git** repositories with forbidden
+  clean/process filter markers, external `core.worktree`/`commondir`,
+  linked Git index, metadata config injection and Git HEAD/status timeouts.
+  Tests assert denial **before** filter marker execution.
+- **Preflight is still not a secure execution boundary:** metadata may be
+  changed after static inspection by another same-UID process, and the code
+  does not attest checkout provenance or protect readable host secrets.
+  Only an owner-controlled protected staging clone and an effect-boundary
+  recheck can authorize future native agent execution. No such launch permit
+  exists in this PR.
 
 ## Critical gates before ANY real `codex exec` on WORK
 
