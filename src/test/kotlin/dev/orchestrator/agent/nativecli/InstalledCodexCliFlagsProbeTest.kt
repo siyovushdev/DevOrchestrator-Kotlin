@@ -53,13 +53,22 @@ class InstalledCodexCliFlagsProbeTest {
             env["GIT_CONFIG_GLOBAL"] = "/dev/null"
             env["GIT_TEMPLATE_DIR"] = template.toString()
             env["GIT_TERMINAL_PROMPT"] = "0"
-            val process = builder.start()
-            process.outputStream.close()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            check(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0) {
-                "Disposable Git fixture could not be created: ${output.take(200)}"
+            val outputFile = Files.createTempFile(temp, "fixture-git-", ".log")
+            try {
+                builder.redirectOutput(outputFile.toFile())
+                val process = builder.start()
+                process.outputStream.close()
+                val ended = process.waitFor(10, TimeUnit.SECONDS)
+                if (!ended) process.destroyForcibly()
+                check(ended && process.exitValue() == 0) {
+                    "Disposable Git fixture command did not succeed"
+                }
+                val output = Files.readString(outputFile)
+                require(output.length < 4096) { "Unexpected Git fixture output size" }
+                return output.trim()
+            } finally {
+                Files.deleteIfExists(outputFile)
             }
-            return output.trim()
         }
         gitCmd("init", "-q", "--initial-branch=main")
         gitCmd("add", "--", "README.md")
