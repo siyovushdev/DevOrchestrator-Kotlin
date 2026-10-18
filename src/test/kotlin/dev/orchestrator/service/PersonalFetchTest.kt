@@ -11,6 +11,13 @@ import kotlin.test.*
 
 class PersonalFetchTest {
     @TempDir lateinit var temp: Path
+    @Test fun revokedConfigurationRefusesFetchBeforeAnyProcessOrCredentialFile() {
+        val artifacts=Files.createDirectory(temp.resolve("fetch"))
+        val checkout=Files.createDirectory(temp.resolve("checkout"))
+        val issue=GitHubIssueRecord(1424152600,17,1017,Instant.EPOCH,"Task","body","a".repeat(40),true)
+        assertFails { fetchPersonalCheckout("FAKE",issue,checkout,artifacts,{false}) }
+        Files.list(artifacts).use { assertEquals(0,it.count()) }
+    }
     @Test fun productionFetchUsesSupervisorSupportedPrivateCredentialWithoutPersistingSecret() {
         val artifacts=Files.createDirectory(temp.resolve("fetch"))
         val checkout=Files.createDirectory(temp.resolve("checkout"))

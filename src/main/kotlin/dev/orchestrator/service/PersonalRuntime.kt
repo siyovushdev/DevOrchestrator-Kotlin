@@ -110,6 +110,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
 /** Supervised fixed-target fetch; secret is passed privately and is absent from saved launch JSON. */
 internal fun fetchPersonalCheckout(token: String,issue: GitHubIssueRecord,checkout: Path,fetchArtifacts: Path,
     permitted: (GitHubIssueRecord) -> Boolean, git: Path = Path.of("/usr/bin/git")) {
+    check(permitted(issue))
     val askpass=fetchArtifacts.resolve("askpass.sh")
     Files.writeString(askpass,"#!/bin/sh\ncase \"${'$'}1\" in\n *Username*) echo x-access-token ;;\n *Password*) printf '%s\\n' \"${'$'}DEVORCH_PUBLISH_TOKEN\" ;;\n *) exit 1 ;;\nesac\n")
     check(askpass.toFile().setExecutable(true,true))
