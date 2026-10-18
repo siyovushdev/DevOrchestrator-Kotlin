@@ -116,7 +116,8 @@ class NativeCodexCliPreflight(
         val git = requireExecutable(req.gitBinary)
             ?: return CodexProbeResult.Blocked(CodexProbeBlocker.INVALID_GIT_BINARY)
 
-        fun read(args: List<String>) = processReader.read(args, dir)
+        fun read(args: List<String>, toolBinDirectory: Path? = null) =
+            processReader.read(args, dir, toolBinDirectory)
         val head = read(listOf(git.toString(), "-C", dir.toString(),
             "rev-parse", "--verify", "HEAD"))
         if (head !is ProbeProcessResult.Exited || head.exitCode != 0 ||
@@ -129,8 +130,8 @@ class NativeCodexCliPreflight(
             status.output.isNotBlank()) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.DIRTY_BASE)
         }
-        val version = read(listOf(codex.toString(), "--version"))
-        val help = read(listOf(codex.toString(), "exec", "--help"))
+        val version = read(listOf(codex.toString(), "--version"), req.codexBinary.parent)
+        val help = read(listOf(codex.toString(), "exec", "--help"), req.codexBinary.parent)
         if (version is ProbeProcessResult.TimedOutOrUnknown ||
             help is ProbeProcessResult.TimedOutOrUnknown) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.PROBE_TIMEOUT_OR_UNKNOWN)
@@ -185,7 +186,7 @@ class BoundedNativeProbeReader(
         require(maxOutputBytes in 1024..1_000_000)
     }
 
-    fun read(args: List<String>, cwd: Path): ProbeProcessResult {
+    fun read(args: List<String>, cwd: Path, extraTrustedBinaryDirectory: Path? = null): ProbeProcessResult {
         require(args.isNotEmpty() && args.size <= 20)
         val home = Files.createTempDirectory("devorch-probe-home-")
         try {
@@ -196,7 +197,16 @@ class BoundedNativeProbeReader(
             env.clear()
             // Include only trusted binary directory, never arbitrary user/Issue PATH.
             val binaryParent = Path.of(args.first()).parent?.toString() ?: ""
-            env["PATH"] = "$binaryParent:/usr/bin:/bin"
+            // NVM installs a node entrypoint and codex symlink in the same bin dir;
+            // once owner-validated, that directory may supply node to the shebang.
+            val trustedDir = extraTrustedBinaryDirectory?.let {
+                if (!it.isAbsolute || it.normalize() != it || !Files.isDirectory(it)) {
+                    return ProbeProcessResult.StartFailed
+                }
+                it.toRealPath().toString()
+            }
+            env["PATH"] = listOfNotNull(trustedDir, binaryParent, "/usr/bin", "/bin")
+                .distinct().joinToString(":")
             env["HOME"] = home.toString()
             env["LANG"] = "C"
             env["GIT_CONFIG_NOSYSTEM"] = "1"
