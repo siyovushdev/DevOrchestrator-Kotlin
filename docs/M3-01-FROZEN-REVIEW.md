@@ -3,7 +3,8 @@
 Issue #30, stacked on #29. **Offline artifact slice; real Review/E2E NOT_RUN.**
 
 `FrozenCandidate.capture` creates a new snapshot, copies bounded regular files,
-retains executable mode and writes a canonical manifest bound to workflow,
+retains executable mode and writes a version-2 canonical manifest bound to the
+explicit candidate ID (also validated against the directory name), workflow,
 Coding attempt/session/generation, trusted base/tree IDs and verification
 status/evidence. Top-level `.git` directory is excluded. Nested Git metadata,
 symlinks, hardlinks, special files, path traversal, overlapping storage and
@@ -13,7 +14,9 @@ there is no deletion or overwrite helper. Linux POSIX file metadata is required.
 The manifest digest must be stored in trusted durable controller state.
 `reopen(directory, expectedManifestSha256)` verifies against that external digest;
 reading a digest supplied by the snapshot itself would not establish trust.
-`isIntact` rechecks file inventory/content/size/executable mode and manifest.
+`isIntact` rechecks candidate/directory identity, file inventory/content/size/executable mode and manifest.
+Review receipts include the candidate ID; distinct captures cannot share a
+receipt even with otherwise identical content and Coding bindings.
 Snapshot mutation (including changes by a reviewer) invalidates eligibility;
 no reviewer edits are copied back into the candidate.
 

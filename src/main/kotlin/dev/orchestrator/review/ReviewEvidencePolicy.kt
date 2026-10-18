@@ -4,6 +4,7 @@ internal enum class ReviewVerdict { PASS, CHANGES_REQUIRED, NOT_RUN }
 
 /** Receipt supplied by a trusted independent runner; this class cannot authenticate sessions. */
 internal data class ReviewReceipt(
+    val candidateId: String,
     val reviewerAttemptId: String,
     val reviewerSessionId: String,
     val candidateManifestSha256: String,
@@ -26,6 +27,7 @@ internal object ReviewEvidencePolicy {
         require(correctionsUsed in 0..2 && projectLimit in 0..2)
         val binding = candidate.binding
         if (!candidate.isIntact() || binding.verification != VerificationStatus.PASS ||
+            receipt.candidateId != candidate.candidateId ||
             candidate.manifestSha256 != currentManifestSha256 ||
             receipt.candidateManifestSha256 != candidate.manifestSha256 ||
             receipt.candidateTree != binding.candidateTree || receipt.codingGeneration != binding.generation ||

@@ -40,6 +40,7 @@ internal data class CandidateBinding(
  * The protected controller must establish those facts before binding these IDs.
  */
 internal class FrozenCandidate private constructor(
+    val candidateId: String,
     val directory: Path,
     val binding: CandidateBinding,
     val manifestSha256: String,
@@ -50,7 +51,8 @@ internal class FrozenCandidate private constructor(
     fun isIntact(): Boolean = try {
         canonicalDirectory(directory)
         val manifest = boundedBytes(directory.resolve("manifest"), MAX_MANIFEST)
-        sha256(manifest) == manifestSha256 && inventory(filesDirectory) == expectedFiles &&
+        directory.fileName.toString() == candidateId &&
+            sha256(manifest) == manifestSha256 && inventory(filesDirectory) == expectedFiles &&
             Files.list(directory).use { paths -> paths.map { it.fileName.toString() }.toList().toSet() } ==
                 setOf("files", "manifest")
     } catch (_: Exception) { false }
@@ -93,7 +95,7 @@ internal class FrozenCandidate private constructor(
             }
             check(inventory(source, skipRootGit = true) == before) { "Candidate changed during capture" }
             check(inventory(files) == before) { "Snapshot differs from candidate" }
-            val header = listOf("DEVORCH-FROZEN-1",binding.workflowId,binding.codingAttemptId,
+            val header = listOf("DEVORCH-FROZEN-2",candidateId,binding.workflowId,binding.codingAttemptId,
                 binding.codingSessionId,binding.generation.toString(),binding.baseSha,binding.candidateTree,
                 binding.verification.name,binding.verificationEvidenceId).joinToString("\t")
             val manifest = (header + "\n" + before.entries.joinToString("") { (path,digest) ->
@@ -101,7 +103,7 @@ internal class FrozenCandidate private constructor(
             }).toByteArray(Charsets.UTF_8)
             check(manifest.size <= MAX_MANIFEST)
             Files.write(destination.resolve("manifest"),manifest,CREATE_NEW,WRITE)
-            return FrozenCandidate(destination,binding,sha256(manifest),before.toMap()).also { check(it.isIntact()) }
+            return FrozenCandidate(candidateId,destination,binding,sha256(manifest),before.toMap()).also { check(it.isIntact()) }
         }
 
         /** expectedManifestSha256 must come from durable trusted state, not this directory. */
@@ -113,9 +115,12 @@ internal class FrozenCandidate private constructor(
             val lines = bytes.toString(Charsets.UTF_8).split('\n')
             require(lines.last().isEmpty())
             val h = lines.first().split('\t')
-            require(h.size == 9 && h[0] == "DEVORCH-FROZEN-1")
-            val binding = CandidateBinding(h[1],h[2],h[3],h[4].toInt(),h[5],h[6],
-                VerificationStatus.valueOf(h[7]),h[8])
+            require(h.size == 10 && h[0] == "DEVORCH-FROZEN-2")
+            val candidateId = h[1]
+            require(candidateId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")) &&
+                directory.fileName.toString() == candidateId)
+            val binding = CandidateBinding(h[2],h[3],h[4],h[5].toInt(),h[6],h[7],
+                VerificationStatus.valueOf(h[8]),h[9])
             val files = sortedMapOf<String,FileDigest>()
             for (line in lines.drop(1).dropLast(1)) {
                 val fields = line.split('\t')
@@ -127,7 +132,7 @@ internal class FrozenCandidate private constructor(
                 require(files.put(name,FileDigest(size,fields[1],fields[2] == "x")) == null)
             }
             require(files.values.sumOf { it.size } <= MAX_TOTAL_BYTES)
-            return FrozenCandidate(directory,binding,expectedManifestSha256,files.toMap()).also { require(it.isIntact()) }
+            return FrozenCandidate(candidateId,directory,binding,expectedManifestSha256,files.toMap()).also { require(it.isIntact()) }
         }
 
         private fun inventory(root: Path, skipRootGit: Boolean = false): Map<String,FileDigest> {

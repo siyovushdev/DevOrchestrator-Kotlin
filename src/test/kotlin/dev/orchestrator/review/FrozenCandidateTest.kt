@@ -26,7 +26,7 @@ class FrozenCandidateTest {
         FrozenCandidate.capture(source,Files.createDirectories(temp.resolve("snapshots")),"candidate",bind)
 
     private fun receipt(candidate: FrozenCandidate, verdict: ReviewVerdict = ReviewVerdict.PASS) =
-        ReviewReceipt("review-attempt","review-session",candidate.manifestSha256,
+        ReviewReceipt(candidate.candidateId,"review-attempt","review-session",candidate.manifestSha256,
             candidate.binding.candidateTree,candidate.binding.generation,verdict)
 
     @Test fun captureReopenPreservesContentExecutableModeAndTrustedBinding() {
@@ -143,5 +143,21 @@ class FrozenCandidateTest {
             assertEquals(ReviewDisposition.NEEDS_OWNER,
                 ReviewEvidencePolicy.evaluate(candidate,receipt,candidate.manifestSha256,generation,0))
         }
+    }
+
+    @Test fun distinctCandidateIdsCannotShareReceiptsOrReopenAfterRename() {
+        val source = source()
+        val root = Files.createDirectory(temp.resolve("snapshots"))
+        val a = FrozenCandidate.capture(source,root,"candidate-A",binding)
+        val b = FrozenCandidate.capture(source,root,"candidate-B",binding)
+        assertNotEquals(a.manifestSha256,b.manifestSha256)
+        assertEquals(ReviewDisposition.NEEDS_OWNER,
+            ReviewEvidencePolicy.evaluate(b,receipt(a),b.manifestSha256,0,2))
+        assertEquals(ReviewDisposition.NEEDS_OWNER,ReviewEvidencePolicy.evaluate(
+            b,receipt(b).copy(candidateId=a.candidateId),b.manifestSha256,0,2))
+        val renamed = root.resolve("candidate-C")
+        Files.move(a.directory,renamed)
+        assertFails { FrozenCandidate.reopen(renamed,a.manifestSha256) }
+        assertFalse(a.isIntact())
     }
 }
