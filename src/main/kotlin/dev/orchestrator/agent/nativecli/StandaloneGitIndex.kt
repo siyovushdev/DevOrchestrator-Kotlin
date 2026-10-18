@@ -29,7 +29,9 @@ internal object StandaloneGitIndex {
             if (mode !in setOf(0x81a4, 0x81ed, 0xa000)) return false
             data.position(start + 60)
             val flags = data.short.toInt() and 0xffff
-            if (flags and 0x4000 != 0) return false // extended/sparse/skip-worktree unsupported
+            // CE_VALID hides changed tracked content from status; these indexes are
+            // outside the minimal standalone profile, as are extended/sparse entries.
+            if (flags and 0xc000 != 0) return false
             val pathStart = data.position()
             while (data.hasRemaining() && bytes[data.position()] != 0.toByte()) data.get()
             if (!data.hasRemaining()) return false
