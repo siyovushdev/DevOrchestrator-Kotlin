@@ -381,7 +381,9 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
         Files.writeString(guarded,"""#!/usr/bin/python3
 import os, sys
 if ${py("--git-dir=${clone.resolve(".git")}")} in sys.argv:
-    assert 'rev-parse' in sys.argv, 'saved Git metadata is a read-only input'
+    assert any(cmd in sys.argv for cmd in ['rev-parse','read-tree','ls-files']), 'saved Git objects are read-only'
+    if 'rev-parse' not in sys.argv:
+        assert os.environ['GIT_INDEX_FILE'].startswith(${py(artifacts.toString()+"/")})
 os.execv('/usr/bin/git',['/usr/bin/git']+sys.argv[1:])
 """)
         assertTrue(guarded.toFile().setExecutable(true))
@@ -390,6 +392,51 @@ os.execv('/usr/bin/git',['/usr/bin/git']+sys.argv[1:])
         assertEquals("PASS",guardedEngine.step())
         assertEquals("PASS",guardedEngine.step())
         assertEquals(WorkflowPhase.READY_FOR_PR,workflow().phase)
+    }
+
+    @Test fun reportPathIsNeverGivenToCandidateInterpreterAndEarlyExitCannotPass() {
+        // Independent reviewer reproduction: zero TestCases, candidate writes report and exits.
+        setup(tests="import json, os, sys\nwith open(sys.argv[2], 'x') as f: json.dump({'tests_run':3,'failures':0,'errors':0,'skipped':0},f)\nos._exit(0)\n")
+        assertNotEquals("PASS",engine().step())
+        assertNotEquals(WorkflowPhase.REVIEWING,workflow().phase)
+        assertNotEquals(WorkflowPhase.READY_FOR_PR,workflow().phase)
+        assertEquals(0,launches("review"))
+    }
+
+    @Test fun cleanWorkerExitWithoutCompletedInvocationIsUnknownAndNotCorrection() {
+        setup(tests="import os\nos._exit(0)\n")
+        assertEquals("UNKNOWN",engine().step())
+        assertEquals(WorkflowHold.NEEDS_OWNER,workflow().hold)
+        assertEquals(0,workflow().correctionsUsed); assertEquals(1,claims())
+        assertEquals("NEEDS_OWNER",engine().step())
+    }
+
+    @Test fun unexpectedSuccessIsKnownFailureAndAllowsBoundedCorrection() {
+        setup(tests="import unittest\nclass Unexpected(unittest.TestCase):\n @unittest.expectedFailure\n def test_fixed(self): self.assertEqual(1,1)\n")
+        assertEquals("FAIL",engine(minimum=1).step())
+        val receipt = assertNotNull(engine().verification("wf",0))
+        assertEquals(1,receipt.unexpectedSuccesses)
+        assertEquals(WorkflowPhase.QUEUED,workflow().phase); assertEquals(0,claims())
+        assertEquals("CORRECTION_PLANNED",engine().step())
+    }
+
+    @Test fun ignoredCodingCacheIsNotPartOfSavedCandidateOrTestSnapshot() {
+        setup(codingExtra="Path('.gitignore').write_text('cache.tmp\\n'); Path('cache.tmp').write_text('generated cache')")
+        assertEquals("PASS",engine().step())
+        val receipt = assertNotNull(engine().verification("wf",0))
+        assertEquals(3,receipt.completedInvocations)
+        assertFalse(Files.exists(Path.of(receipt.directory).resolve("files/cache.tmp")))
+        assertEquals("generated cache",Files.readString(clone.resolve("cache.tmp")))
+        assertEquals("PASS",engine().step())
+    }
+
+    @Test fun uncertainExistingPublicationEffectPreventsReviewAndReady() {
+        setup(); assertEquals("PASS",engine().step())
+        db.write { c -> c.mutate("""INSERT INTO effects_outbox(effect_id,workflow_id,kind,state,
+            idempotency_key,intended_target,expected_sha,recorded_at)
+            VALUES ('uncertain','wf','PUSH','UNCERTAIN','uncertain','fixture',?,'now')""","a".repeat(40)) }
+        assertEquals("ALREADY_CONSUMED_OR_GUARD_DENIED",engine().step())
+        assertEquals(0,launches("review")); assertEquals(WorkflowPhase.REVIEWING,workflow().phase)
     }
 
     companion object {

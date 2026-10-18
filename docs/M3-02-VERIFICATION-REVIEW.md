@@ -11,15 +11,33 @@ process facts, checks their pinned input/profile identities, reads the real CLI 
 and terminal events, and independently hashes the saved checkout through a fresh Git index.
 A `SUCCEEDED` row or agent's text alone cannot create a verification receipt.
 
-Verification uses a separate `FrozenCandidate` copy, with no `.git` or valuable child env,
-and a fixed controller-owned Python `unittest` harness (`-I -B`; discover `tests`). The
-minimum executed, non-skipped test count is trusted configuration, pinned with the original
-correction limit. Actual command execution, test counts, exit status, tree integrity and
+Verification selects paths from the exact saved Git tree into a new temporary index,
+copies those actual checkout files into `FrozenCandidate`, and independently hashes them
+in a new object store. Ignored caches/build products stay outside the candidate and test
+copy; modifications/deletions of actual candidate files still fail closed. Saved Git
+objects/index are read-only inputs.
+
+A fixed controller-owned Python `unittest` dispatcher (`-I -B`; discover `tests`) never
+imports the candidate in its parent process. It discovers IDs in a bounded child protocol,
+then dispatches one fresh worker per test ID. Only the parent receives the final-report
+path; it counts completed dispatched invocations and aggregates skips, errors, failures
+and unexpected successes. Early worker exit, malformed/incomplete output or changed IDs
+cannot create normal completed evidence. Discovered IDs/digest and dispatched counts are
+persisted with the command, harness digest, process and tree evidence. Each test runs in
+a fresh interpreter, so cross-test mutable process state is not supported in this slice.
+The minimum non-skipped count is trusted configuration, pinned with the original
+correction limit. Command execution, completed results, exit status, tree integrity and
 supervisor birth/terminal/ECHILD cleanup must agree. No tests/all-skipped cannot pass.
 A known test failure may request correction; timeouts, lost streams, changed files and
 incomplete process evidence become UNKNOWN/NEEDS_OWNER and cannot consume a correction.
-Tests are still arbitrary generated code: the separately approved disposable OS context
-must prevent access to valuable files/credentials; a scrubbed env does not provide that.
+Test code and in-worker Python semantics remain untrusted: a worker can intentionally
+assert nothing or spoof its own protocol. These facts attest controller-dispatched test
+invocations and standard unittest results, not hostile-code method-entry/semantic truth.
+The separate parent removes direct candidate ownership of the controller report; it is
+not an OS sandbox. Protected controller artifacts and the separately approved disposable
+OS context must prevent access to valuable files/credentials; a scrubbed env does not.
+The new parent and all worker descendants remain inside the existing bounded subreaper
+lifetime. Infrastructure UNKNOWN never authorizes a correction.
 
 After required tests pass, a final frozen candidate binds the coding attempt/session,
 base, generation, Git tree and verification identity to a durable manifest hash. The

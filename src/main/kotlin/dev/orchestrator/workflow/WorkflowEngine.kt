@@ -20,6 +20,7 @@ internal data class VerificationReceipt(
     val generation: Int, val status: VerificationStatus, val testsRun: Int,
     val artifacts: String, val process: JsonNode, val command: List<String>,
     val harnessSha256: String, val minimumTests: Int, val failures: Int, val errors: Int, val skipped: Int,
+    val unexpectedSuccesses: Int, val completedInvocations: Int, val testIdsSha256: String,
 )
 
 /**
@@ -113,9 +114,10 @@ internal class WorkflowEngine(
             val tree = completion.first
             val session = completion.second
             val artifacts = Files.createDirectory(artifactRoot.resolve("${intent.attemptId}-verify"))
+            val selectedPaths = savedCandidateFiles(intent,tree,artifacts.resolve("inventory.index"))
             val pending = FrozenCandidate.capture(intent.workspace,Files.createDirectory(artifacts.resolve("input")),"${intent.attemptId}-untested",
                 CandidateBinding(w.id,intent.attemptId,session,w.correctionsUsed,intent.baseSha,tree,
-                    VerificationStatus.NOT_RUN,"${intent.attemptId}-tests"))
+                    VerificationStatus.NOT_RUN,"${intent.attemptId}-tests"),selectedPaths)
             check(tree(intent.workspace,pending.filesDirectory,artifacts.resolve("snapshot.index"),intent.baseSha)==tree)
             val required = db.read { c -> c.rows("SELECT minimum_tests FROM workflow_verifications WHERE workflow_id=? AND generation=?",
                 w.id,w.correctionsUsed) { it.getInt(1) }.single() }
@@ -127,8 +129,7 @@ internal class WorkflowEngine(
                 "PYTHONDONTWRITEBYTECODE" to "1")
             val command = listOf(python.toRealPath().toString(),"-I","-B",script.toString(),
                 pending.filesDirectory.toString(),report.toString(),required.toString())
-            val harnessSha256 = java.security.MessageDigest.getInstance("SHA-256").digest(boundedFile(script,65536))
-                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            val harnessSha256 = sha256(boundedFile(script,65536))
             val observed = NativeProcessRunner(python).run(command,pending.filesDirectory,environment,
                 artifacts,byteArrayOf(),timeout.toMillis()) { birth ->
                 db.write { c -> event(c,w.id,"VERIFICATION_PROCESS_STARTED",mapper.writeValueAsString(birth)); true }
@@ -143,15 +144,20 @@ internal class WorkflowEngine(
             val failures = result.path("failures").asInt(-1)
             val errors = result.path("errors").asInt(-1)
             val skipped = result.path("skipped").asInt(-1)
-            check(count>=0 && failures>=0 && errors>=0 && skipped in 0..count)
-            val pass = count-skipped>=required && failures==0 && errors==0
+            val unexpected = result.path("unexpected_successes").asInt(-1)
+            val completed = result.path("completed_invocations").asInt(-1)
+            val testIdsSha256 = sha256(boundedFile(artifacts.resolve("tests.test-ids.json"),1_048_576))
+            check(result.path("discovery_completed").asBoolean(false) && count==completed &&
+                result.path("test_ids_sha256").asText()==testIdsSha256 &&
+                count>=0 && failures>=0 && errors>=0 && unexpected>=0 && skipped in 0..count)
+            val pass = count-skipped>=required && failures==0 && errors==0 && unexpected==0
             check(observed.evidence.path("exit_code").asInt()==if (pass) 0 else 1)
             val status = if (pass) VerificationStatus.PASS else VerificationStatus.FAIL
             val candidate = FrozenCandidate.capture(pending.filesDirectory,snapshotRoot,"${intent.attemptId}-candidate",
                 pending.binding.copy(verification=status))
             val receipt = VerificationReceipt(candidate.candidateId,candidate.directory.toString(),candidate.manifestSha256,
                 tree,intent.attemptId,session,w.correctionsUsed,status,count,artifacts.toString(),observed.evidence,
-                command,harnessSha256,required,failures,errors,skipped)
+                command,harnessSha256,required,failures,errors,skipped,unexpected,completed,testIdsSha256)
             db.write { c ->
                 check(c.mutate("UPDATE workflow_verifications SET state=?,evidence=? WHERE workflow_id=? AND generation=? AND state='STARTING'",
                     if (pass) "SUCCEEDED" else "FAILED",encodeVerification(receipt),w.id,w.correctionsUsed)==1)
@@ -159,7 +165,7 @@ internal class WorkflowEngine(
                 if (!currentAfterAction(c,w,WorkflowPhase.VERIFYING) || !policyCurrent(c,policy.version))
                     hold(c,w.id,"VERIFICATION_STATE_CHANGED")
                 else if (pass) phase(c,w.id,WorkflowPhase.REVIEWING)
-                else correction(c,w,tree,"Required unittest failed: $count run, $failures failures, $errors errors, $skipped skipped")
+                else correction(c,w,tree,"Required unittest failed: $count run, $failures failures, $errors errors, $skipped skipped, $unexpected unexpected successes")
                 event(c,w.id,"VERIFICATION_${status.name}",encodeVerification(receipt))
             }
             return status.name
@@ -344,6 +350,22 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         }
     }
 
+    private fun savedCandidateFiles(intent: CodingIntent,tree: String,index: Path): Set<String> {
+        check(TrustedGitCheckoutGuard.accepts(intent.workspace))
+        fun command(vararg args: String): String {
+            val result = probe.read(listOf(git.toRealPath().toString(),"--no-optional-locks",
+                "--git-dir=${intent.workspace.resolve(".git")}","--work-tree=${intent.workspace}",
+                "-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false")+args,intent.workspace,gitIndex=index)
+            check(result is ProbeProcessResult.Exited && result.exitCode==0)
+            return result.output
+        }
+        // Read saved object inventory into a new index; never stage/write saved objects.
+        command("read-tree",tree)
+        val paths = command("ls-files","--cached","-z").split('\u0000')
+        check(paths.last().isEmpty() && paths.size in 2..10001)
+        return paths.dropLast(1).toSet().also { check(it.size==paths.size-1) }
+    }
+
     private fun tree(repository: Path, files: Path, index: Path, base: String): String {
         check(TrustedGitCheckoutGuard.accepts(repository))
         fun observed(args: List<String>, cwd: Path, useIndex: Boolean = false): String {
@@ -384,6 +406,12 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
 
     private fun quiet(c: Connection,workflow: String,workspace: Path): Boolean {
         val root = store.findPolicy(repositoryId)!!.workspaceRoot
+        if (c.rows("""SELECT w.repository_id,p.workspace_root FROM effects_outbox e
+            JOIN workflows w ON w.workflow_id=e.workflow_id JOIN projects p ON p.repository_id=w.repository_id
+            WHERE e.state IN ('SENDING','UNCERTAIN')""") {
+            val scope = try { Path.of(it.getString(2)).toRealPath() } catch (_: Exception) { return@rows true }
+            it.getLong(1)==repositoryId || scope.startsWith(root) || root.startsWith(scope)
+        }.any { it }) return false
         if (c.rows("""SELECT a.attempt_id,a.workflow_id,w.repository_id,p.workspace_root,a.state FROM agent_attempts a
             JOIN workflows w ON w.workflow_id=a.workflow_id JOIN projects p ON p.repository_id=w.repository_id""") {
             val scope = try { Path.of(it.getString(4)).toRealPath() } catch (_: Exception) { return@rows true }
@@ -456,6 +484,8 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
             "no_proxy" to "localhost,127.0.0.1,::1") +
             listOf("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy").associateWith { proxy }
     }
+    private fun sha256(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun boundedFile(path: Path,limit: Int): ByteArray {
         check(Files.isRegularFile(path,NOFOLLOW_LINKS) && (Files.getAttribute(path,"unix:nlink",NOFOLLOW_LINKS) as Number).toInt()==1)
         return Files.newInputStream(path,NOFOLLOW_LINKS).use { it.readNBytes(limit+1) }.also { check(it.size<=limit) }
@@ -467,6 +497,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
             n["candidateTree"].asText(),n["codingAttemptId"].asText(),n["codingSessionId"].asText(),n["generation"].asInt(),
             VerificationStatus.valueOf(n["status"].asText()),n["testsRun"].asInt(),n["artifacts"].asText(),n["process"],
             n["command"].map { it.asText() },n["harnessSha256"].asText(),n["minimumTests"].asInt(),
-            n["failures"].asInt(),n["errors"].asInt(),n["skipped"].asInt())
+            n["failures"].asInt(),n["errors"].asInt(),n["skipped"].asInt(),n["unexpectedSuccesses"].asInt(),
+            n["completedInvocations"].asInt(),n["testIdsSha256"].asText())
     }
 }
