@@ -16,9 +16,9 @@ import java.nio.file.attribute.BasicFileAttributes
  */
 internal object TrustedGitCheckoutGuard {
     private val nofollow = arrayOf(LinkOption.NOFOLLOW_LINKS)
-    private val filterAttribute = Regex("""(?i)(?:^|\\s)[!-]?(?:filter(?:=|\\s|$))""")
-    private val sectionPattern = Regex("""\\[([a-zA-Z]+)(?: "([a-zA-Z0-9._/-]+)")?]""")
-    private val keyValuePattern = Regex("""([a-zA-Z][a-zA-Z0-9]*)\\s*=\\s*(.*)""")
+    private val filterAttribute = Regex("""(?i)(?:^|\s)[!-]?(?:filter(?:=|\s|$))""")
+    private val sectionPattern = Regex("""\[([a-zA-Z]+)(?: "([a-zA-Z0-9._/-]+)")?]""")
+    private val keyValuePattern = Regex("""([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.*)""")
     private const val MAX_CONFIG_BYTES = 32_768L
     private const val MAX_ATTRIBUTE_BYTES = 65_536L
     private const val MAX_WALK_ENTRIES = 250_000
