@@ -49,15 +49,28 @@ class NativeCodexCliPreflightTest {
     private fun fakeGit(dirty: Boolean = false, actualSha: String = sha): Path =
         fake("git", """
             case "$*" in
-              *rev-parse*) printf '%s\n' '$actualSha' ;;
-              *status*) ${if (dirty) "printf '?? .env\n'" else ":"} ;;
+              *--show-toplevel*) printf '%s\\n' '${worktree}' ;;
+              *--absolute-git-dir*|*--git-common-dir*)
+                  printf '%s\\n' '${worktree.resolve(".git")}' ;;
+              *rev-parse*) printf '%s\\n' '$actualSha' ;;
+              *status*) ${if (dirty) "printf '?? .env\\n'" else ":"} ;;
               *) exit 7 ;;
             esac
         """.trimIndent())
 
     private fun setup(kind: ProjectKind = ProjectKind.PERSONAL,
                       permitted: Boolean = true, role: AgentRole = AgentRole.CODING) {
-        Files.createDirectories(worktree.resolve(".git"))
+        val metadata = worktree.resolve(".git")
+        Files.createDirectories(metadata.resolve("objects"))
+        Files.createDirectories(metadata.resolve("refs"))
+        Files.writeString(metadata.resolve("HEAD"), "ref: refs/heads/main\\n")
+        Files.writeString(metadata.resolve("config"), """
+            [core]
+                repositoryformatversion = 0
+                filemode = true
+                bare = false
+                logallrefupdates = true
+        """.trimIndent() + "\\n")
         val store = db()
         store.insertProject(
             RegisteredProject("personal-scratch", 101, kind, root.toString()), "owner:test"
