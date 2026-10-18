@@ -60,7 +60,7 @@ data class CodexNativeProbeRequest(
  * Explicit read-only local probe. Never called from startup/scheduler/HTTP, and no
  * model inference or agent execution. Child processes only receive a scrubbed env.
  */
-class NativeCodexCliPreflight(
+internal class NativeCodexCliPreflight(
     private val store: SqliteTaskStore,
     private val catalog: SqliteAgentCatalog,
     private val processReader: BoundedNativeProbeReader = BoundedNativeProbeReader(),
@@ -177,7 +177,7 @@ sealed interface ProbeProcessResult {
  * No user prompt, shell, agent session, credentials or automation loop.
  * Timeout does NOT prove all descendants ended; never automatically retry UNKNOWN.
  */
-class BoundedNativeProbeReader(
+internal class BoundedNativeProbeReader(
     private val timeout: Duration = Duration.ofSeconds(8),
     private val maxOutputBytes: Long = 65_536,
 ) {
