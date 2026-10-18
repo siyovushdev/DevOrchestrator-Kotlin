@@ -60,7 +60,12 @@ def run(config):
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     started = time.monotonic()
-    child = subprocess.Popen(config["argv"], cwd=config["cwd"], env=config["env"],
+    environment = dict(config["env"])
+    for name in config.get("private_env_names", []):
+        if name != "DEVORCH_PUBLISH_TOKEN":
+            raise ValueError("Unsupported private environment")
+        environment[name] = os.environ[name]
+    child = subprocess.Popen(config["argv"], cwd=config["cwd"], env=environment,
                              start_new_session=True)  # stdin/out/err inherited from Kotlin pipes
     root = identity(child.pid)
     root_exit = None

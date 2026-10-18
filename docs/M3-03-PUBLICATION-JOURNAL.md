@@ -1,6 +1,13 @@
 # M3-03a — publication intent / exact receipt journal
 
-Issue #33, stacked on #32. **Persistence only; real Publisher/E2E NOT_RUN.**
+Issue #33, stacked on #32. **Original persistence slice; real Publisher/E2E NOT_RUN.**
+
+Current integration: [#37 guarded Publisher](M3-03-GUARDED-PUBLISHER.md) consumes this
+journal and #39's saved controller verification/Review receipts. The original #34
+slice described below did not run a sender. The #37 extension adds guarded
+`beginPublishing`/`finish`, targeted uncertain holds and receipt reads using the
+same schema; it does not turn journal rows into execution authority. Real Coding/
+Tests/Review are now Owner-reported PASS on Samsung; real publication remains NOT_RUN.
 
 `PublicationJournal` reuses the shared SQLite outbox. Schema v6 adds immutable
 publication plans and full matched read-back receipts. A plan pins workflow,
@@ -18,12 +25,12 @@ repeat is an idempotent read, not a renewed authorization. A changed plan cannot
 replace existing evidence. For the first E2E, a plan conservatively reserves its
 repository indefinitely: **no reservation release API** exists in this slice.
 
-A future controller must establish actual verified test/review/source/session/
+The controller must establish actual verified test/review/source/session/
 process-cleanup evidence before setting READY_FOR_PR/PUBLISHING. This journal
 cannot establish those facts from AttemptState.SUCCEEDED or supplied digests.
 Tests arrange those states directly in disposable SQL as **MOCK completed runtime**;
-no production API currently performs that transition. No new phase-changing API
-is exposed by this PR. Current M2 STARTING storage does not grant runtime authority.
+the #34 slice did not perform that transition. The #37 Publisher additionally validates
+the actual #39 evidence before changing phase. M2 STARTING storage grants no runtime authority.
 
 `markSending` is a one-way durable intent CAS, never a sender or publish permit.
 It rechecks PERSONAL policy version, PUBLISHING/NONE/generation, terminal attempt
@@ -47,11 +54,12 @@ singleton PR with a different number/URL is not the same confirmed effect.
 A mismatch retains SENDING; the caller must reconcile or hold, never resend.
 `holdUnreconciledSends` makes unresolved sends UNCERTAIN + NEEDS_OWNER and retains
 all intents. Confirmation after read-only reconciliation does not clear the
-Owner hold. There is no retry/rejection/release helper and no automatic terminal
-workflow advancement; the integration engine still owns those decisions.
+Owner hold. There is no retry/rejection/release helper. The #37 integration owns guarded terminal
+workflow advancement after all three receipts and a final remote read-back.
 
 Offline tests verify exact receipts/sequence, concurrent idempotency and one
 send CAS, policy/manifest refusal, wrong/ambiguous/non-Draft PR, lost-response
 restart and held confirmation, legacy/WORK refusal, rollback, immutable history
 and additive v5 migration. No Git commit/push, HTTP write or credentialed sender
-runs here. #31 blocks real native execution/publication; no WORK/1MT or Merge.
+runs in the original journal slice. #31/#37 still require separate real publication GO;
+no WORK/1MT or Merge.
