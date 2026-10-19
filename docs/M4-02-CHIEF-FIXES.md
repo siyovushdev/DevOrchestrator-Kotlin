@@ -50,7 +50,9 @@ Preflight перед сервисом и durable Coding/Tests/Review action не
 4. Подготовить новую disposable копию approved source и прогнать адресный
    canary regression (fake secrets only). Проверить доступность native Codex и
    `code-mode-host` в поддерживаемой установке: системный `/usr` либо native binary
-   с соседним helper. Произвольные Node wrappers/скрытые зависимости не пробрасываются;
+   с соседним `codex-code-mode-host`/`code-mode-host`. Для npm native package
+   доступны только известные исполняемые файлы helper, `../codex-resources/bwrap`
+   и `../codex-path/rg` (RO, без symlinks), не весь package/HOME. Произвольные Node wrappers/скрытые зависимости не пробрасываются;
    несовместимость должна остановить запуск, а не расширить mounts HOME.
 5. Только после успешных локальных проверок заменить дистрибутив приложения,
    сохранив прежние config/DB/artifacts. Новые поля служебной БД добавляются
@@ -120,3 +122,51 @@ comments. Команда не запускает очередь: службу Ow
 автоматического matching нет. Они остаются `NEEDS_OWNER`; миграция не выдумывает
 доказательства. Нет команд force/retry/reset для неизвестных model/PUSH/PR effects,
 ошибок подготовки, внутренних ошибок или иных holds.
+
+
+## Зафиксированная несовместимость Ubuntu 24.04
+
+[Первый CI24](https://github.com/siyovushdev/DevOrchestrator-Kotlin/actions/runs/39196077206)
+остановлен до тестов: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
+Это подтверждённый отказ preflight, согласующийся с userns/capability policy;
+логи CI не содержат kernel audit для более точной атрибуции.
+На текущем Linux outer bubblewrap/canary работают, но адресный **реальный Codex
+0.163.0 `sandbox` probe без inference/auth/GitHub** остановлен при nested userns:
+`No permissions to create new namespace`. Код Python внутри Codex не стартовал.
+Это безопасный отказ, **не PASS совместимости**. Model auth/login не проверялись.
+
+Execution CI использует Ubuntu 22.04 с теми же обязательными namespaces/canary и
+проверкой реального native Codex sandbox child (официальный npm binary package,
+фиксированная версия 0.163.0, без модели и токенов). GitHub read-only CI остаётся
+24.04. Green CI22 не разрешает запуск на Ubuntu24/Samsung.
+
+Если Owner/admin после approval проверяет штатный профиль Ubuntu24, команды ниже
+— инструкция, не выполненное изменение системы:
+
+```
+sudo apt-get install bubblewrap apparmor-profiles
+dpkg-query -S /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+sudo aa-status
+```
+
+Проверить, нет ли уже установленного/загруженного другого профиля для
+`/usr/bin/bwrap`; при наличии — STOP для admin review, не перезаписывать.
+Только после проверки пакетного происхождения и содержимого vendor profile:
+
+```
+sudo apparmor_parser -Q /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+sudo install -o root -g root -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+Это **не гарантированный fix**: vendor profile может запрещать capabilities
+потомкам и ломать nested Codex sandbox, также влияет на Flatpak/desktop и будущие
+package updates. Не скачивать профиль из upstream master с другой ABI, не писать
+кастомные правила, не выключать AppArmor/sysctl и не ставить setuid. После любого
+согласованного admin изменения обязательны exact namespace, Python canary и
+`InstalledCodexIsolationTest` с native binary в disposable окружении. При любом
+отказе оставить `NOT_READY` и службу OFF; без доступной поддерживаемой границы
+обновлять автономный запуск на Samsung нельзя.
+
+Официальное объяснение политики и ограничений профиля:
+[Ubuntu Security](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007).

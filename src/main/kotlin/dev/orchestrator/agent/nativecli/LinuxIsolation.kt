@@ -45,8 +45,15 @@ internal object LinuxIsolation {
         if (executable != null && !executable.startsWith(Path.of("/usr"))) {
             bind(executable.toRealPath(), false)
             // Native Codex installs its matching helper beside the CLI.
-            val helper = executable.toRealPath().parent.resolve("code-mode-host")
-            if (Files.isRegularFile(helper)) bind(helper, false)
+            val bin=executable.toRealPath().parent
+            for (name in listOf("code-mode-host","codex-code-mode-host","../codex-resources/bwrap","../codex-path/rg")) {
+                val helper=bin.resolve(name).normalize()
+                if (Files.exists(helper,java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    require(Files.isRegularFile(helper,java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
+                        helper.toRealPath()==helper && Files.isExecutable(helper)) { "Invalid native Codex helper" }
+                    bind(helper, false)
+                }
+            }
         }
         if (output != null) bind(output, true)
         args += listOf("--chdir", workspace.toString(), "--")
