@@ -48,3 +48,11 @@ per-Issue saved state, bounded correction and one Draft PR; uncertain actions st
 without replay. [Owner configuration](config/personal.properties.example) starts OFF;
 [user-unit example](packaging/devorch-personal.service.example) is not installed/enabled.
 Live unattended acceptance and HOME activation require separate Owner permission.
+
+### Issue #47 Remote Worker integration (Draft, OFF by default)
+
+[Этап 2: WorkflowEngine → VM → контроллерный Publisher](docs/M4-03-REMOTE-WORKFLOW.md)
+сохраняет Owner-разрешения, реальные remote evidence и одноразовые попытки. Есть адресные
+`check-remote` / `resume-remote`; UNKNOWN не перезапускает модели или публикации.
+[SSH-конфигурация](config/personal-ssh-vm.properties.example) выключена. Локальные интеграционные
+фикстуры не являются живым VM E2E; развёртывание и один реальный запуск требуют отдельного GO.

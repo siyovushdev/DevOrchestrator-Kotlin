@@ -4,16 +4,19 @@ import dev.orchestrator.agent.*
 import dev.orchestrator.agent.nativecli.*
 import dev.orchestrator.publish.*
 import dev.orchestrator.storage.*
-import dev.orchestrator.workflow.WorkflowEngine
+import dev.orchestrator.workflow.*
+import dev.orchestrator.remote.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 
-internal data class TaskProgress(val stage: String, val url: String? = null)
+internal data class TaskProgress(val stage: String, val url: String? = null,val reason: String? = null)
 internal interface TaskRuntime {
     fun prepare(issue: GitHubIssueRecord)
     fun recover(issue: GitHubIssueRecord)
     fun step(issue: GitHubIssueRecord): TaskProgress
+    fun checkRemote(issue: GitHubIssueRecord,id: String): String = error("REMOTE_DISABLED")
+    fun resumeRemote(issue: GitHubIssueRecord,id: String,digest: String): TaskProgress? = null
 }
 
 /** Reuses production journals, supervised Coding, controller tests, fresh Review and guarded Publisher. */
@@ -22,16 +25,19 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     private val publicationHttp: PublicationHttp = GitHubPublicationHttp(token),
     private val publicationPush: PublicationPush = GitHubBranchPush(token),
     private val fetch: (GitHubIssueRecord,Path,Path) -> Unit = { i,c,a -> fetchPersonalCheckout(token,i,c,a,permitted) },
+    private val remoteOverride: RemoteExecutionSettings? = null,
 ) : TaskRuntime {
-    init {
-        if(config.runtimeMode!="local") throw ServiceStopped("REMOTE_WORKFLOW_BRIDGE_NOT_READY: SSH protocol stage only")
-    }
+    private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { RemoteExecutionSettings(it.peer,SshWorkerTransport(it)) } else null }
     private val repo=SMOKE_TARGET.repositoryId
     private fun root(i: GitHubIssueRecord)=config.root.resolve("task-${i.githubIssueId}")
     private fun database(i: GitHubIssueRecord)=root(i).resolve("run.db")
     private fun engine(i: GitHubIssueRecord)=WorkflowEngine(database(i),repo,config.codex,config.home,
         root(i).resolve("artifacts"),root(i).resolve("snapshots"),config.minimumTests,2,
-        Duration.ofSeconds(120),proxyPort=config.proxyPort,ownerGo={ permitted(i) })
+        Duration.ofSeconds(120),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote)
+    private fun requireSite(i: GitHubIssueRecord) {
+        val site=RemoteWorkflowBridge.site(database(i),"issue-${i.githubIssueId}")
+        check(if(remote==null) site==null else site==remote!!.peer) { "EXECUTION_SITE_CHANGED" }
+    }
     private fun publisher(i: GitHubIssueRecord)=DraftPrPublisher(database(i),root(i).resolve("publisher"),i.baseSha,
         GitHubPublicationApi(publicationHttp),publicationPush,{ plan,_ ->
             permitted(i) && plan.repositoryId==repo && plan.issueNumber==i.issueNumber
@@ -74,23 +80,26 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
                 120,100_000),null,"owner:personal-service")
             catalog.bindRole(repo,role,id,1,null,"owner:personal-service")
         }
-        for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
+        if(remote==null) for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
             check(NativeCodexCliPreflight(store,catalog).inspect(CodexNativeProbeRequest(repo,role,checkout,
                 issue.baseSha,config.codex,Path.of("/usr/bin/git"))) is CodexProbeResult.FlagsOnly)
         }
+        remote?.let { RemoteWorkflowBridge.pin(database(issue),"issue-${issue.githubIssueId}",it.peer) }
         check(CodingAttemptJournal(database(issue)).plan(repo,issue.issueNumber,0,"issue-${issue.githubIssueId}-coding-0",
             checkout,git("rev-parse","HEAD^{tree}"))!=null)
     }
     override fun recover(issue: GitHubIssueRecord) {
         check(Files.isRegularFile(database(issue)))
+        requireSite(issue)
         engine(issue).recover(issue.issueNumber)
         publisher(issue).recover()
     }
     override fun step(issue: GitHubIssueRecord): TaskProgress {
         check(permitted(issue))
+        requireSite(issue)
         val store=SqliteTaskStore(database(issue))
         var w=store.findWorkflow(repo,issue.issueNumber)!!
-        if (w.hold!=WorkflowHold.NONE) return TaskProgress("held")
+        if (w.hold!=WorkflowHold.NONE) return TaskProgress("held",reason=w.holdReason)
         if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return TaskProgress("done",publisher(issue).publish().url)
         if (w.phase in setOf(WorkflowPhase.READY_FOR_PR,WorkflowPhase.PUBLISHING)) {
             val result=publisher(issue).publish()
@@ -101,13 +110,25 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         check(permitted(issue))
         engine(issue).step(issue.issueNumber)
         w=store.findWorkflow(repo,issue.issueNumber)!!
-        if (w.hold!=WorkflowHold.NONE || w.version==before) return TaskProgress("held")
+        if (w.hold!=WorkflowHold.NONE || w.version==before) return TaskProgress("held",reason=w.holdReason)
         return TaskProgress(when(w.phase) {
             WorkflowPhase.VERIFYING -> "tests"
             WorkflowPhase.REVIEWING,WorkflowPhase.READY_FOR_PR -> "review"
             else -> "coding"
         })
     }
+    override fun checkRemote(issue: GitHubIssueRecord,id: String): String = engine(issue).checkRemote(id)
+    override fun resumeRemote(issue: GitHubIssueRecord,id: String,digest: String): TaskProgress? {
+        requireSite(issue)
+        if(!permitted(issue) || !engine(issue).resumeRemote(id,digest)) return null
+        val w=SqliteTaskStore(database(issue)).findWorkflow(repo,issue.issueNumber)!!
+        return TaskProgress(if(w.hold!=WorkflowHold.NONE) "held" else when(w.phase) {
+            WorkflowPhase.VERIFYING -> "tests"
+            WorkflowPhase.REVIEWING,WorkflowPhase.READY_FOR_PR -> "review"
+            else -> "coding"
+        },reason=w.holdReason)
+    }
+
 }
 
 /** Supervised fixed-target fetch; secret is passed privately and is absent from saved launch JSON. */

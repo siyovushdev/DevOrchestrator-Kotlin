@@ -65,6 +65,26 @@ print('{"type":"turn.completed"}')
     private fun journal()=RemoteAttemptJournal(temp.resolve("controller.db"))
     private fun client(j: RemoteAttemptJournal=journal(),t: WorkerTransport=transport())=RemoteWorkerClient(j,t,RemoteEvidence(scratch))
 
+    @Test fun workflowPreparationAndTransportClaimRollbackTogetherBeforeAnyExchange() {
+        setup(); val j=journal(); val r=request(); var exchanges=0
+        val c=client(j,WorkerTransport { _,_ -> exchanges++; error("must not send") })
+        assertFails { c.submitPrepared(r,{ true }) { connection ->
+            connection.createStatement().use { it.execute("CREATE TABLE fake_workflow_transition(id TEXT)") }
+            error("fixture invariant failure")
+        } }
+        assertNull(j.find(r.attemptId)); assertEquals(0,exchanges)
+        dev.orchestrator.storage.RuntimeDatabase(temp.resolve("controller.db")).read { connection ->
+            connection.createStatement().use { statement -> statement.executeQuery("SELECT 1 FROM sqlite_master WHERE name='fake_workflow_transition'").use { assertFalse(it.next()) } }
+        }
+    }
+    @Test fun consumedTransportClaimDoesNotRepeatPreparationOrSubmit() {
+        setup(); val j=journal(); val r=request(); var exchanges=0; var plans=0
+        val c=client(j,WorkerTransport { _,_ -> exchanges++; error("fixture lost connection") })
+        assertFailsWith<RemoteExchangeUnknown> { c.submitPrepared(r,{ true }) { plans++ } }
+        assertEquals("UNKNOWN",c.submitPrepared(r,{ true }) { plans++ })
+        assertEquals(1,plans); assertEquals(1,exchanges)
+    }
+
     @Test fun realWorkerReceiptAndExportAreBoundToRequestAndNativeCommand() {
         setup("Path('hello.py').write_text(\"print('changed')\\n\")")
         val r=request(); val j=journal()

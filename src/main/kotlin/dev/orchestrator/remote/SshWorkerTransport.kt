@@ -8,6 +8,7 @@ import java.util.concurrent.TimeUnit
 
 /** A fixed PERSONAL endpoint. Config never comes from Issue text or model output. */
 internal data class SshWorkerConfig(val identityFile: Path, val knownHosts: Path) {
+    val peer: String get()="vboxuser@127.0.0.1:2222:"+RemoteProtocol.digest(RemoteProtocol.file(knownHosts,65536))+":"+identityFile
     init {
         for(p in listOf(identityFile,knownHosts)) {
             require(p.isAbsolute && p.toRealPath()==p && Files.isRegularFile(p,NOFOLLOW_LINKS))

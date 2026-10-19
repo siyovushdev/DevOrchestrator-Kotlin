@@ -18,22 +18,36 @@ internal class RemoteAttemptJournal(file: Path) {
         s.execute("""CREATE TABLE IF NOT EXISTS remote_attempt_events(
             id INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL REFERENCES remote_attempts(attempt_id),
             at TEXT NOT NULL, state TEXT NOT NULL, evidence_digest TEXT, diagnostic TEXT)""")
+        s.execute("""CREATE TRIGGER IF NOT EXISTS remote_request_immutable BEFORE UPDATE OF
+            attempt_id,workflow_id,role,generation,request,digest ON remote_attempts
+            BEGIN SELECT RAISE(ABORT,'immutable remote request'); END""")
+        s.execute("""CREATE TRIGGER IF NOT EXISTS remote_result_immutable BEFORE UPDATE ON remote_attempts
+            WHEN OLD.state='EVIDENCE_STORED' BEGIN SELECT RAISE(ABORT,'immutable remote result'); END""")
+        s.execute("""CREATE TRIGGER IF NOT EXISTS remote_attempt_no_delete BEFORE DELETE ON remote_attempts
+            BEGIN SELECT RAISE(ABORT,'immutable remote attempt'); END""")
     } } }
     data class Saved(val request: RemoteRequest,val state: String,val evidence: ByteArray?)
-    fun find(id: String): Saved?=db.read { c -> c.rows("SELECT request,state,evidence FROM remote_attempts WHERE attempt_id=?",id) {
-        Saved(RemoteRequest(it.getBytes(1)),it.getString(2),it.getBytes(3))
+    fun find(id: String): Saved?=db.read { c -> c.rows("SELECT * FROM remote_attempts WHERE attempt_id=?",id) {
+        val request=RemoteRequest(it.getBytes("request")); val identity=request.json["identity"]
+        check(request.attemptId==id && request.sha256==it.getString("digest") &&
+            identity["workflowId"].asText()==it.getString("workflow_id") && identity["role"].asText()==it.getString("role") &&
+            identity["generation"].asInt()==it.getInt("generation")) { "REMOTE_SAVED_REQUEST_CORRUPTED" }
+        Saved(request,it.getString("state"),it.getBytes("evidence"))
     }.singleOrNull() }
     /** False means NO transport call: same attempt/slot is never executed a second time. */
-    fun claim(r: RemoteRequest): Boolean=db.write { c ->
+    fun claim(r: RemoteRequest,prepare: (java.sql.Connection) -> Unit = {}): Boolean=db.write { c ->
+        if(!claim(c,r)) false else { prepare(c); true }
+    }
+    private fun claim(c: java.sql.Connection,r: RemoteRequest): Boolean {
         val i=r.json["identity"]
         val previous=c.rows("SELECT attempt_id,digest FROM remote_attempts WHERE attempt_id=? OR (workflow_id=? AND role=? AND generation=?)",
             r.attemptId,i["workflowId"].asText(),i["role"].asText(),i["generation"].asInt()) { it.getString(1) to it.getString(2) }
         previous.filter { it.first==r.attemptId }.forEach { check(it.second==r.sha256) { "REMOTE_ATTEMPT_IDENTITY_CHANGED" } }
-        if(previous.isNotEmpty()) return@write false
+        if(previous.isNotEmpty()) return false
         check(c.rows("SELECT attempt_id FROM remote_attempts WHERE state IN ('SENDING','UNKNOWN','RUNNING')") { it.getString(1) }.isEmpty()) { "REMOTE_UNKNOWN_REQUIRES_OWNER" }
         c.mutate("INSERT INTO remote_attempts VALUES(?,?,?,?,?,?,'SENDING',NULL)",r.attemptId,i["workflowId"].asText(),i["role"].asText(),i["generation"].asInt(),r.bytes,r.sha256)
         c.mutate("INSERT INTO remote_attempt_events(attempt_id,at,state) VALUES(?,?,'SENDING')",r.attemptId,Instant.now().toString())
-        true
+        return true
     }
     fun record(id: String,state: String,evidence: ByteArray?=null,diagnostic: String?=null) = db.write { c ->
         require(state in setOf("UNKNOWN","RUNNING","EVIDENCE_STORED"))
@@ -47,12 +61,19 @@ internal class RemoteAttemptJournal(file: Path) {
     }
 }
 
-/** Not called by PERSONAL service yet: the atomic workflow/artifact bridge is a separate stage. */
+/** Transport facts remain separate from workflow completion. */
 internal class RemoteWorkerClient(private val journal: RemoteAttemptJournal,private val transport: WorkerTransport,
                                  private val evidence: RemoteEvidence) {
-    fun submit(request: RemoteRequest,permitted: () -> Boolean): String {
+    fun submit(request: RemoteRequest,permitted: () -> Boolean): String = submitPrepared(request,permitted) {}
+    /** The callback pins the existing workflow in the SAME transaction as the transport claim. */
+    fun submitPrepared(request: RemoteRequest,permitted: () -> Boolean,prepare: (java.sql.Connection) -> Unit): String {
         check(permitted()) { "OWNER_PERMISSION_REQUIRED" }
-        if(!journal.claim(request)) return journal.find(request.attemptId)?.state ?: "DUPLICATE_SLOT"
+        if(!journal.claim(request,prepare)) return journal.find(request.attemptId)?.state ?: "DUPLICATE_SLOT"
+        return executeFreshClaim(request,permitted)
+    }
+    /** Private: a consumed/reloaded intent can never call the submit exchange again. */
+    private fun executeFreshClaim(request: RemoteRequest,permitted: () -> Boolean): String {
+        check(permitted()) { "OWNER_PERMISSION_REQUIRED" }
         val wire=RemoteProtocol.mapper.writeValueAsBytes(mapOf("op" to "submit","requestBase64" to Base64.getEncoder().encodeToString(request.bytes)))
         // Any exception after durable intent leaves UNKNOWN; never infer that no remote exec occurred.
         return exchange(request,wire,request.json["timeoutMs"].asLong()+15000)

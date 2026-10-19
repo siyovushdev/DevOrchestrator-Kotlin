@@ -33,6 +33,7 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         if ("body" !in statusColumns) c.mutate("ALTER TABLE personal_status ADD COLUMN body TEXT")
         val taskColumns=c.rows("PRAGMA table_info(personal_tasks)") { it.getString("name") }.toSet()
         if ("resume_state" !in taskColumns) c.mutate("ALTER TABLE personal_tasks ADD COLUMN resume_state TEXT")
+        if ("resume_reason" !in taskColumns) c.mutate("ALTER TABLE personal_tasks ADD COLUMN resume_reason TEXT")
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_reconciliations(
             id INTEGER PRIMARY KEY, issue_id INTEGER NOT NULL, stage TEXT NOT NULL,
             recorded_at TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL)""")
@@ -58,9 +59,10 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
     } }
     private fun hold(i: GitHubIssueRecord,reason: String) = db.write { c ->
         if (reason=="STATUS_OUTCOME_UNKNOWN") {
-            c.mutate("""UPDATE personal_tasks SET resume_state=CASE WHEN state!='held' THEN state ELSE resume_state END,
-                state='held',reason=? WHERE issue_id=? AND (state!='held' OR reason='STATUS_OUTCOME_UNKNOWN')""",reason,i.githubIssueId)
-        } else c.mutate("UPDATE personal_tasks SET state='held',stage='held',reason=?,resume_state=NULL WHERE issue_id=?",reason,i.githubIssueId)
+            c.mutate("""UPDATE personal_tasks SET resume_state=CASE WHEN reason!='STATUS_OUTCOME_UNKNOWN' OR reason IS NULL THEN state ELSE resume_state END,
+                resume_reason=CASE WHEN reason!='STATUS_OUTCOME_UNKNOWN' OR reason IS NULL THEN reason ELSE resume_reason END,
+                state='held',reason=? WHERE issue_id=?""",reason,i.githubIssueId)
+        } else c.mutate("UPDATE personal_tasks SET state='held',stage='held',reason=?,resume_state=NULL,resume_reason=NULL WHERE issue_id=?",reason,i.githubIssueId)
     }
     fun recover() {
         requireHealthy()
@@ -112,8 +114,8 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
                 val progress=runtime.step(i)
                 require(progress.stage in setOf("coding","tests","review","done","held"))
                 if(progress.stage=="done") require(progress.url?.matches(Regex("https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/[1-9][0-9]*"))==true)
-                db.write { it.mutate("UPDATE personal_tasks SET state=?,stage=?,url=? WHERE issue_id=?",
-                    if(progress.stage in setOf("done","held")) progress.stage else "active",progress.stage,progress.url,i.githubIssueId) }
+                db.write { it.mutate("UPDATE personal_tasks SET state=?,stage=?,url=?,reason=? WHERE issue_id=?",
+                    if(progress.stage in setOf("done","held")) progress.stage else "active",progress.stage,progress.url,progress.reason,i.githubIssueId) }
             }
             val now=tasks().single { it.issue.githubIssueId==i.githubIssueId }
             if (!status(i,now.stage,now.url)) return "NEEDS_OWNER"
@@ -184,9 +186,33 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             c.mutate("INSERT INTO personal_reconciliations(issue_id,stage,recorded_at,actor,evidence) VALUES (?,?,?,?,?)",
                 task.issue.githubIssueId,stage,Instant.now().toString(),"owner:local-command",mapper.writeValueAsString(evidence))
             val pending=c.rows("SELECT 1 FROM personal_status WHERE issue_id=? AND state!='confirmed'",task.issue.githubIssueId) { 1 }.isNotEmpty()
-            if (!pending) check(c.mutate("""UPDATE personal_tasks SET state=resume_state,reason=NULL,resume_state=NULL
-                WHERE issue_id=? AND state='held' AND reason='STATUS_OUTCOME_UNKNOWN' AND resume_state IN ('accepted','active','done')""",
+            if (!pending) check(c.mutate("""UPDATE personal_tasks SET state=resume_state,reason=CASE WHEN resume_state='held' THEN resume_reason ELSE NULL END,resume_state=NULL,resume_reason=NULL
+                WHERE issue_id=? AND state='held' AND reason='STATUS_OUTCOME_UNKNOWN' AND (resume_state IN ('accepted','active','done') OR (resume_state='held' AND resume_reason IS NOT NULL AND resume_reason!='STATUS_OUTCOME_UNKNOWN'))""",
                 task.issue.githubIssueId)==1)
+        }
+        return true
+    }
+
+    fun checkRemote(number: Int,id: String): String {
+        requireHealthy()
+        val task=tasks().single { it.issue.issueNumber==number }
+        check(task.state=="active" || (task.state=="held" && task.reason=="REMOTE_ACTION_UNKNOWN:$id"))
+        return runtime.checkRemote(task.issue,id)
+    }
+    /** Cross-database restart is idempotent: the inner import retains the exact Owner digest. */
+    fun resumeRemote(number: Int,id: String,digest: String): Boolean {
+        requireHealthy()
+        val task=tasks().single { it.issue.issueNumber==number }
+        check(task.state=="active" || (task.state=="held" && task.reason=="REMOTE_ACTION_UNKNOWN:$id"))
+        if(!permitted() || !github.authorized(task.issue)) return false
+        if(db.read { c -> c.rows("SELECT 1 FROM personal_status WHERE issue_id=? AND state!='confirmed'",task.issue.githubIssueId) { 1 }.isNotEmpty() }) return false
+        val progress=runtime.resumeRemote(task.issue,id,digest) ?: return false
+        db.write { c ->
+            check(c.mutate("""UPDATE personal_tasks SET state=?,stage=?,reason=?,resume_state=NULL
+                WHERE issue_id=? AND (state='active' OR (state='held' AND reason=?))""",
+                if(progress.stage=="held") "held" else "active",progress.stage,progress.reason,task.issue.githubIssueId,"REMOTE_ACTION_UNKNOWN:$id")==1)
+            c.mutate("INSERT INTO personal_reconciliations(issue_id,stage,recorded_at,actor,evidence) VALUES(?,?,?,?,?)",
+                task.issue.githubIssueId,"remote",Instant.now().toString(),"owner:local-command",mapper.writeValueAsString(mapOf("attemptId" to id,"evidenceSha256" to digest)))
         }
         return true
     }

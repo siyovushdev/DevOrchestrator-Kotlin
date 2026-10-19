@@ -130,12 +130,13 @@ internal class RemoteRequest(bytes: ByteArray) {
     companion object {
         /** Caller must supply an already Owner-authorized PERSONAL checkout; not an Issue-facing API. */
         fun capture(identity: RemoteTaskIdentity,checkout: Path,scratch: Path,prompt: String,
-                    model: String="fixture-model",effort: String="default",minimumTests: Int=1,timeoutMs: Long=120000): RemoteRequest {
+                    model: String="fixture-model",effort: String="default",minimumTests: Int=1,timeoutMs: Long=120000,
+                    source: Path=checkout): RemoteRequest {
             require(prompt.toByteArray().size<=65536 && minimumTests in 1..10000 && timeoutMs in 50..120000)
             require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")) && effort in setOf("default","low","medium","high","xhigh"))
             require(TrustedGitCheckoutGuard.accepts(checkout))
             require(RemoteProtocol.git(checkout,"rev-parse","HEAD")==identity.baseSha)
-            val image=RemoteProtocol.inventory(checkout)
+            val image=RemoteProtocol.inventory(source)
             val copied=scratch.resolve("input"); RemoteProtocol.materialize(image,copied)
             val hashScratch=Files.createDirectory(scratch.resolve("hash"))
             require(RemoteProtocol.tree(copied,hashScratch)==identity.sourceTree)

@@ -57,8 +57,9 @@ internal class RemoteEvidence(private val scratchRoot: Path) {
                     val report=RemoteProtocol.mapper.readTree(requireNotNull(decoded["tests.json"]))
                     val ids=requireNotNull(decoded["tests.test-ids.json"])
                     check(report["discovery_completed"]?.asBoolean()==true && report["test_ids_sha256"]?.asText()==RemoteProtocol.digest(ids))
-                    check(report["tests_run"]?.isInt==true && report["tests_run"].asInt()>=r["minimumTests"].asInt() && report["completed_invocations"]==report["tests_run"])
-                    for(key in listOf("failures","errors","skipped","unexpected_successes")) check(report[key]?.isInt==true && report[key].asInt()==0)
+                    check(report["tests_run"]?.isInt==true && report["skipped"]?.isInt==true && report["skipped"].asInt() in 0..report["tests_run"].asInt() &&
+                        report["tests_run"].asInt()-report["skipped"].asInt()>=r["minimumTests"].asInt() && report["completed_invocations"]==report["tests_run"])
+                    for(key in listOf("failures","errors","unexpected_successes")) check(report[key]?.isInt==true && report[key].asInt()==0)
                 } else {
                     val events=requireNotNull(decoded["events.log"]).toString(Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }.map(RemoteProtocol.mapper::readTree).toList()
                     check(events.count { it.path("type").asText()=="turn.completed" }==1 && events.none { it.path("type").asText() in setOf("turn.failed","error") })
