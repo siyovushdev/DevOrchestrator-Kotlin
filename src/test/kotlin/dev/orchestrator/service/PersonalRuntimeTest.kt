@@ -55,7 +55,7 @@ assert not any(k in os.environ for k in ['DEVORCH_PERSONAL_TOKEN','DEVORCH_FETCH
 prompt=sys.stdin.read()
 last=Path(sys.argv[sys.argv.index('--output-last-message')+1])
 mode=sys.argv[sys.argv.index('--sandbox')+1]
-state=Path(${mapper.writeValueAsString(temp.toString())})
+state=Path(os.environ['CODEX_HOME'])
 count=state / ('coding-count' if mode=='workspace-write' else 'review-count')
 n=int(count.read_text())+1 if count.exists() else 0
 count.write_text(str(n))
@@ -136,8 +136,8 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
             s=service(records); s.recover() // Restart after EVERY completed action, including corrections/publish.
         }
         assertEquals("IDLE",s.tick()); assertEquals(2,posts); assertEquals(2,sends)
-        assertEquals("2",Files.readString(temp.resolve("coding-count"))) // 3 Coding invocations total.
-        assertEquals("2",Files.readString(temp.resolve("review-count")))
+        assertEquals("2",Files.readString(home.resolve(".codex/coding-count"))) // 3 Coding invocations total.
+        assertEquals("2",Files.readString(home.resolve(".codex/review-count")))
         for(i in records) {
             val db=root.resolve("task-${i.githubIssueId}/run.db")
             val w=SqliteTaskStore(db).findWorkflow(1424152600,i.issueNumber)!!
@@ -153,7 +153,7 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
         repeat(7) { s.tick() }
         assertEquals(1,posts); assertEquals(1,sends)
         s=service(records); s.recover(); repeat(3) { assertEquals("NEEDS_OWNER",s.tick()) }
-        assertEquals(1,posts); assertEquals("0",Files.readString(temp.resolve("coding-count")))
-        assertEquals("0",Files.readString(temp.resolve("review-count")))
+        assertEquals(1,posts); assertEquals("0",Files.readString(home.resolve(".codex/coding-count")))
+        assertEquals("0",Files.readString(home.resolve(".codex/review-count")))
     }
 }

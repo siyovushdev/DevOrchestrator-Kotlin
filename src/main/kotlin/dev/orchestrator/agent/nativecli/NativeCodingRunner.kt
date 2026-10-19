@@ -43,6 +43,7 @@ internal class NativeCodingRunner(
     private val proxyPort: Int = 10809,
     private val ownerGo: () -> Boolean = { true },
 ) {
+    private val databasePath=database.toAbsolutePath().normalize()
     private val store = SqliteTaskStore(database)
     private val journal = CodingAttemptJournal(database)
     private val catalog = SqliteAgentCatalog(database)
@@ -71,6 +72,8 @@ internal class NativeCodingRunner(
             issue.workflowId != intent.workflowId || issue.bodySha256 != intent.issueBodySha256 ||
             issue.baseSha != intent.baseSha) return CodingRunResult(null,"INPUT_CHANGED")
         try {
+            LinuxIsolation.requireModelHome(home,databasePath,artifactRoot,intent.workspace)
+            LinuxIsolation.requireAvailable()
             canonicalDirectory(home)
             canonicalDirectory(home.resolve(".codex"))
             canonicalDirectory(artifactRoot)
@@ -98,7 +101,8 @@ internal class NativeCodingRunner(
                 return CodingRunResult(null,"WORKTREE_CONTENT_CHANGED",artifacts)
         } catch (_: GitOutcomeUnknown) { return preflightUnknown(attemptId,artifacts) }
         catch (_: Exception) { return CodingRunResult(null,"BASELINE_CAPTURE_FAILED",artifacts) }
-        val lastMessage = artifacts.resolve("last-message.txt")
+        val output = Files.createDirectory(artifacts.resolve("output"))
+        val lastMessage = output.resolve("last-message.txt")
         val command = CodexExecCommandPlanner.plan(codex.toRealPath(),intent.workspace,lastMessage,assigned)
         val proxy = "http://127.0.0.1:$proxyPort"
         val childEnv = linkedMapOf("HOME" to home.toString(),"CODEX_HOME" to home.resolve(".codex").toString(),
@@ -129,7 +133,8 @@ internal class NativeCodingRunner(
             return CodingRunResult(if (written) state else AttemptState.UNKNOWN,
                 if (written) reason else "JOURNAL_STATE_CHANGED",artifacts,tree)
         }
-        val observation = NativeProcessRunner(python,outputLimit).run(command.argumentVector,intent.workspace,
+        val observation = NativeProcessRunner(python,outputLimit).run(
+            LinuxIsolation.prefix(intent.workspace,true,home,codex,output)+command.argumentVector,intent.workspace,
             childEnv,artifacts,prompt,limitMs,lastMessage) { birth ->
             ownerGo() && journal.markRunning(attemptId,mapper.writeValueAsString(mapOf("attempt_id" to attemptId,
                 "identity" to birth,"cli_binary" to codex.toRealPath().toString(),

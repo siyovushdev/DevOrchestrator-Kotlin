@@ -76,7 +76,7 @@ prompt = sys.stdin.read()
 assert 'Add tiny function' in prompt
 last = Path(sys.argv[sys.argv.index('--output-last-message')+1])
 mode = sys.argv[sys.argv.index('--sandbox')+1]
-root = Path(${py(temp.toString())})
+root = Path(os.environ['CODEX_HOME'])
 if mode == 'workspace-write':
     count = root / 'coding-count'
     n = int(count.read_text())+1 if count.exists() else 0
@@ -111,7 +111,45 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
     private fun py(value: String): String = com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(value)
     private fun workflow() = assertNotNull(store.findWorkflow(repo,1))
     private fun claims(): Int = db.read { c -> c.rows("SELECT COUNT(*) FROM runtime_reservations") { it.getInt(1) }.single() }
-    private fun launches(role: String): Int = temp.resolve("$role-count").let { if (Files.exists(it)) Files.readString(it).toInt()+1 else 0 }
+    private fun launches(role: String): Int = home.resolve(".codex/$role-count").let { if (Files.exists(it)) Files.readString(it).toInt()+1 else 0 }
+
+    @Test fun hostilePythonAndCodexDescendantsCannotReachControllerCanaryOrDatabase() {
+        val secret = temp.resolve("controller.env")
+        Files.writeString(secret,"FAKE_CANARY_ONLY")
+        val attacks = """
+from pathlib import Path
+import os, subprocess
+for name in [${py(secret.toString())}, ${py(database.toString())},
+             '/proc/${ProcessHandle.current().pid()}/root'+${py(secret.toString())},
+             '/proc/${ProcessHandle.current().pid()}/environ']:
+    for mode in ['r', 'r+']:
+        try:
+            with open(name, mode) as f:
+                if mode == 'r': f.read()
+                else: f.write('compromised')
+        except OSError: pass
+        else: raise AssertionError('controller data reachable: '+name)
+"""
+        val testAttacks=attacks.replace("for name in [","for name in ["+py(home.resolve(".codex/auth.json").toString())+", ")
+        val tests = """
+import unittest
+class Boundary(unittest.TestCase):
+ def test_denied(self):
+${testAttacks.prependIndent("  ")}
+  import socket
+  with self.assertRaises(OSError): socket.create_connection(('127.0.0.1',10809),timeout=0.2)
+"""
+        setup(codingExtra="subprocess_code = " + py(attacks) +
+            "\nimport subprocess\nsubprocess.run(['/usr/bin/python3','-c',subprocess_code],check=True)",
+            review="import subprocess\nsubprocess.run(['/usr/bin/python3','-c',"+py(attacks)+"],check=True)\n"+pass,
+            tests=tests)
+        Files.writeString(home.resolve(".codex/auth.json"),"FAKE_MODEL_AUTH_ONLY")
+        assertEquals("PASS",engine(minimum=1).step())
+        assertEquals("PASS",engine(minimum=1).step())
+        assertEquals("FAKE_CANARY_ONLY",Files.readString(secret))
+        assertEquals("FAKE_MODEL_AUTH_ONLY",Files.readString(home.resolve(".codex/auth.json")))
+        assertEquals(WorkflowPhase.READY_FOR_PR,workflow().phase)
+    }
 
     @Test fun savedCodingIsVerifiedAndReviewedInFreshSessionThenRestartHasNoEffects() {
         setup()
@@ -297,10 +335,10 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
         assertEquals("POLICY_OR_VERIFICATION_DENIED",engine().step()); assertEquals(0,launches("review"))
     }
 
-    @Test fun testMutationOfSnapshotIsUnknownEvenWhenTestsReportSuccess() {
+    @Test fun testMutationOfSnapshotIsDeniedAndFailsVerification() {
         setup(tests=suite+"\nfrom pathlib import Path\nPath('answer.py').write_text('mutated')\n")
-        assertEquals("UNKNOWN",engine().step())
-        assertEquals(WorkflowHold.NEEDS_OWNER,workflow().hold); assertEquals(1,claims())
+        assertEquals("FAIL",engine().step())
+        assertEquals(WorkflowPhase.QUEUED,workflow().phase); assertEquals(0,claims())
         assertFalse(Files.readString(clone.resolve("answer.py")).contains("mutated"))
     }
 

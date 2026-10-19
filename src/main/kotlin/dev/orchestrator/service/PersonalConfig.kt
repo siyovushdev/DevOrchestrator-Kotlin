@@ -29,6 +29,9 @@ internal data class PersonalConfig(
             val root=directory("root"); val home=directory("agentHome")
             require(Files.getPosixFilePermissions(root).none { it.name.startsWith("GROUP_") || it.name.startsWith("OTHERS_") })
             require(Files.getOwner(root).name==System.getProperty("user.name"))
+            require(!Path.of(System.getProperty("user.home")).toAbsolutePath().normalize().startsWith(home)) {
+                "Controller HOME or its ancestor cannot be delegated"
+            }
             require(root!=home && !root.startsWith(home) && !home.startsWith(root))
             val binary=Path.of(p.getProperty("codex"))
             require(binary.isAbsolute)

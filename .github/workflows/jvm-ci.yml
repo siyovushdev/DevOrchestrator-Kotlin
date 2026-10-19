@@ -21,6 +21,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.0'
+      - name: Linux execution boundary
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / -- /usr/bin/true
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
       - name: PERSONAL distribution stays OFF without credentials
