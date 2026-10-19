@@ -18,6 +18,10 @@ class InstalledCodexIsolationTest {
         val workspace=Files.createDirectory(temp.resolve("checkout"))
         val home=Files.createDirectory(temp.resolve("model-home"))
         Files.createDirectory(home.resolve(".codex"))
+        // Codex refuses to generate argv0 aliases under /tmp. Supply the same
+        // trusted binary alias in this disposable fixture, never in installed HOME.
+        val aliases=Files.createDirectory(home.resolve(".codex/fixture-bin"))
+        Files.createSymbolicLink(aliases.resolve("codex-linux-sandbox"),binary)
         val artifacts=Files.createDirectory(temp.resolve("artifacts"))
         val output=Files.createDirectory(temp.resolve("output"))
         val secret=temp.resolve("controller.env")
@@ -38,7 +42,7 @@ print('INSTALLED_CODEX_SANDBOX_CHILD_ISOLATED')
         val command=LinuxIsolation.prefix(workspace,true,home,binary,output)+listOf(binary.toString(),"sandbox",
             "--config","sandbox_mode=\"workspace-write\"","--","/usr/bin/python3","-c",code)
         val observed=NativeProcessRunner(Path.of("/usr/bin/python3")).run(command,workspace,
-            mapOf("HOME" to home.toString(),"CODEX_HOME" to home.resolve(".codex").toString(),"PATH" to "/usr/bin:/bin","LANG" to "C.UTF-8"),
+            mapOf("HOME" to home.toString(),"CODEX_HOME" to home.resolve(".codex").toString(),"PATH" to "$aliases:/usr/bin:/bin","LANG" to "C.UTF-8"),
             artifacts,byteArrayOf(),15000) { true }
         assertEquals(AttemptState.SUCCEEDED,observed.state,observed.reason+" "+Files.readString(artifacts.resolve("events.log")))
         assertEquals("FAKE_CONTROLLER_CANARY_ONLY",Files.readString(secret))
