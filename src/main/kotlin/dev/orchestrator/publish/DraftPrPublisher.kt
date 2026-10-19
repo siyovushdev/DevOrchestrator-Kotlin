@@ -16,7 +16,7 @@ internal data class PublicationResult(val status: String, val url: String? = nul
 
 /** One explicit trusted call, no startup/step/model hook. Real sends require separate Owner GO. */
 internal class DraftPrPublisher(
-    database: Path,
+    private val database: Path,
     private val publisherRoot: Path,
     private val expectedBase: String,
     private val api: GitHubPublicationApi,
@@ -191,13 +191,16 @@ internal class DraftPrPublisher(
         val events=store.listEvents(w.id)
         fun started(type: String,n: JsonNode) = events.filter { it.type==type }.map { mapper.readTree(it.detail) }
             .any { birthMatches(n,it) }
-        check(started("VERIFICATION_PROCESS_STARTED",raw.path("process")))
-        val completion=events.filter { it.type=="CODING_PROCESS_SUCCEEDED" }.map { mapper.readTree(it.detail) }
+        val remote=dev.orchestrator.workflow.RemoteWorkflowBridge.site(database,w.id)!=null
+        if(!remote) check(started("VERIFICATION_PROCESS_STARTED",raw.path("process")))
+        val completion=events.filter { it.type==if(remote) "REMOTE_CODING_COMPLETED" else "CODING_PROCESS_SUCCEEDED" }.map { mapper.readTree(it.detail) }
             .single { it.path("attempt_id").asText()==intent.attemptId }
         clean(completion.path("observed"))
+        if(!remote) {
         val codingBirth=events.filter { it.type=="CODING_PROCESS_STARTED" }.map { mapper.readTree(it.detail) }
             .single { it.path("attempt_id").asText()==intent.attemptId }.path("identity")
         check(birthMatches(completion.path("observed"),codingBirth))
+        }
         val codingArtifacts=Path.of(completion.path("artifacts").asText())
         canonical(codingArtifacts); check(codingArtifacts.startsWith(policy.workspaceRoot))
         check(session(codingArtifacts.resolve("events.log"))==b.codingSessionId)
@@ -208,7 +211,7 @@ internal class DraftPrPublisher(
         val reviews=events.filter { it.type=="REVIEW_COMPLETED" }.map { mapper.readTree(it.detail) }
         val review=reviews.single { it.path("receipt").path("codingGeneration").asInt(-1)==w.correctionsUsed }
         clean(review.path("process"))
-        check(started("REVIEW_PROCESS_STARTED",review.path("process")))
+        if(!remote) check(started("REVIEW_PROCESS_STARTED",review.path("process")))
         val r=review.path("receipt")
         val receipt=ReviewReceipt(r.path("candidateId").asText(),r.path("reviewerAttemptId").asText(),r.path("reviewerSessionId").asText(),
             r.path("candidateManifestSha256").asText(),r.path("candidateTree").asText(),r.path("codingGeneration").asInt(-1),
@@ -219,6 +222,7 @@ internal class DraftPrPublisher(
         check(receipt.verdict==ReviewVerdict.PASS && review.path("findings").isArray && review.path("findings").isEmpty &&
             ReviewEvidencePolicy.evaluate(candidate,receipt,candidate.manifestSha256,w.correctionsUsed,2)==ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS &&
             reviews.none { it!==review && it.path("receipt").path("reviewerSessionId").asText()==receipt.reviewerSessionId })
+        if(remote) dev.orchestrator.workflow.RemotePublicationEvidence.validate(database,policy.workspaceRoot,w,candidate,raw,intent,completion,review)
         db.read { c ->
             check(c.rows("""SELECT 1 FROM review_inputs r JOIN agent_attempts a ON a.attempt_id=r.attempt_id
                 JOIN attempt_contexts x ON x.attempt_id=a.attempt_id WHERE r.attempt_id=? AND r.workflow_id=? AND r.generation=?

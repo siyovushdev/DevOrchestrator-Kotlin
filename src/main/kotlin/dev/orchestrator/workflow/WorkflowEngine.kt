@@ -26,29 +26,33 @@ internal data class VerificationReceipt(
 /**
  * Explicit, synchronous PERSONAL Issue slice. No startup/HTTP/scheduler/publisher hook.
  * Calling step/launchReview with a real binary requires separate environment-specific Owner GO.
- * Bubblewrap isolates every test interpreter and the Coding/Review CLI process tree.
+ * Local execution retains its OS boundary; remote execution delegates to the guest native sandbox
+ * and controller-owned unittest harness, then imports the genuine protected guest evidence.
  */
 internal class WorkflowEngine(
-    private val database: Path,
-    private val repositoryId: Long,
+    internal val database: Path,
+    internal val repositoryId: Long,
     private val codex: Path,
     private val home: Path,
-    private val artifactRoot: Path,
+    internal val artifactRoot: Path,
     private val snapshotRoot: Path,
-    private val minimumTests: Int = 1,
-    private val correctionLimit: Int = 2,
-    private val timeout: Duration = Duration.ofSeconds(120),
+    internal val minimumTests: Int = 1,
+    internal val correctionLimit: Int = 2,
+    internal val timeout: Duration = Duration.ofSeconds(120),
     private val git: Path = Path.of("/usr/bin/git"),
     private val python: Path = Path.of("/usr/bin/python3"),
     private val proxyPort: Int = 10809,
-    private val ownerGo: () -> Boolean = { true },
+    internal val ownerGo: () -> Boolean = { true },
+    private val remote: RemoteExecutionSettings? = null,
 ) {
-    private val store = SqliteTaskStore(database)
-    private val db = RuntimeDatabase(database)
-    private val coding = CodingAttemptJournal(database)
-    private val catalog = SqliteAgentCatalog(database)
+    internal val store = SqliteTaskStore(database)
+    internal val db = RuntimeDatabase(database)
+    internal val coding = CodingAttemptJournal(database)
+    internal val catalog = SqliteAgentCatalog(database)
     private val mapper = ObjectMapper()
     private val probe = BoundedNativeProbeReader(maxOutputBytes=1_000_000)
+
+    private val remoteBridge by lazy { remote?.let { RemoteWorkflowBridge(this,it) } }
 
     init {
         require(repositoryId>0 && minimumTests in 1..10000 && correctionLimit in 0..2)
@@ -58,6 +62,7 @@ internal class WorkflowEngine(
     /** One persisted action per call. Repeated terminal/pending calls do not launch twice. */
     fun step(issueNumber: Int = 1): String {
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
+        requireExecutionSite(w.id)
         if (w.hold!=WorkflowHold.NONE || !ownerGo()) return "NEEDS_OWNER"
         return when (w.phase) {
             WorkflowPhase.VERIFYING -> verifyCompletedCoding(issueNumber)
@@ -71,6 +76,7 @@ internal class WorkflowEngine(
             }
             WorkflowPhase.CODING -> {
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
+                remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
                     proxyPort=proxyPort,ownerGo=ownerGo).run(intent.attemptId).reason
             }
@@ -84,6 +90,8 @@ internal class WorkflowEngine(
     }
 
     fun verifyCompletedCoding(issueNumber: Int = 1): String {
+        store.findWorkflow(repositoryId,issueNumber)?.let { requireExecutionSite(it.id) }
+        remoteBridge?.let { return it.execute(issueNumber,"TESTS") }
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
         val intent = latestCoding(w.id) ?: return "NO_CODING"
         if (!ownerGo() || w.phase!=WorkflowPhase.VERIFYING || w.hold!=WorkflowHold.NONE ||
@@ -178,6 +186,8 @@ internal class WorkflowEngine(
     }
 
     fun launchReview(issueNumber: Int = 1): String {
+        store.findWorkflow(repositoryId,issueNumber)?.let { requireExecutionSite(it.id) }
+        remoteBridge?.let { return it.execute(issueNumber,"REVIEW") }
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
         if (!ownerGo() || w.phase!=WorkflowPhase.REVIEWING || w.hold!=WorkflowHold.NONE) return "GUARD_DENIED"
         val verified = verification(w.id,w.correctionsUsed) ?: return "NO_VERIFICATION"
@@ -283,6 +293,8 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
 
     /** Call on exclusive controller recovery, never while another controller is actively running. */
     fun recover(issueNumber: Int = 1): Int {
+        store.findWorkflow(repositoryId,issueNumber)?.let { requireExecutionSite(it.id) }
+        remoteBridge?.let { return it.recover(issueNumber) }
         val workflow = store.findWorkflow(repositoryId,issueNumber) ?: return 0
         if (store.findPolicy(repositoryId)?.kind!=ProjectKind.PERSONAL) return 0
         var count = coding.holdUnreconciledStarts(workflow.id)
@@ -306,6 +318,13 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         }
         return count
     }
+
+    private fun requireExecutionSite(workflow: String) {
+        val site=RemoteWorkflowBridge.site(database,workflow)
+        check(if(remote==null) site==null else site==remote.peer) { "EXECUTION_SITE_CHANGED" }
+    }
+    fun checkRemote(id: String): String = requireNotNull(remoteBridge).checkRemote(id)
+    fun resumeRemote(id: String,digest: String): Boolean = requireNotNull(remoteBridge).resume(id,digest)
 
     private fun trustedCodingCompletion(intent: CodingIntent): Pair<String,String> {
         val events = store.listEvents(intent.workflowId)
@@ -399,22 +418,22 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         return command("write-tree").also { check(it.matches(Regex("[0-9a-f]{40}"))) }
     }
 
-    private fun latestCoding(workflow: String): CodingIntent? = db.read { c ->
+    internal fun latestCoding(workflow: String): CodingIntent? = db.read { c ->
         c.rows("SELECT attempt_id FROM agent_attempts WHERE workflow_id=? AND role='CODING' ORDER BY generation DESC LIMIT 1",workflow) {
             it.getString(1)
         }.singleOrNull()
     }?.let { coding.find(it) }
 
-    private fun current(c: Connection,w: WorkflowSnapshot,phase: WorkflowPhase): Boolean = c.rows(
+    internal fun current(c: Connection,w: WorkflowSnapshot,phase: WorkflowPhase): Boolean = c.rows(
         "SELECT 1 FROM workflows WHERE workflow_id=? AND version=? AND phase=? AND hold='NONE' AND corrections_used=?",
         w.id,w.version,phase.name,w.correctionsUsed) { 1 }.singleOrNull()!=null
     private fun currentAfterAction(c: Connection,w: WorkflowSnapshot,phase: WorkflowPhase): Boolean =
         current(c,w.copy(version=w.version+1),phase)
-    private fun policyCurrent(c: Connection,version: Long): Boolean = c.rows("""SELECT 1 FROM projects p JOIN project_policies pp
+    internal fun policyCurrent(c: Connection,version: Long): Boolean = c.rows("""SELECT 1 FROM projects p JOIN project_policies pp
         ON pp.repository_id=p.repository_id WHERE p.repository_id=? AND p.kind='PERSONAL'
         AND p.policy_version=? AND pp.personal_auto_execution=1""",repositoryId,version) { 1 }.singleOrNull()!=null
 
-    private fun quiet(c: Connection,workflow: String,workspace: Path): Boolean {
+    internal fun quiet(c: Connection,workflow: String,workspace: Path): Boolean {
         val root = store.findPolicy(repositoryId)!!.workspaceRoot
         if (c.rows("""SELECT w.repository_id,p.workspace_root FROM effects_outbox e
             JOIN workflows w ON w.workflow_id=e.workflow_id JOIN projects p ON p.repository_id=w.repository_id
@@ -434,7 +453,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         }.none { it }
     }
 
-    private fun correction(c: Connection,w: WorkflowSnapshot,tree: String,feedback: String) {
+    internal fun correction(c: Connection,w: WorkflowSnapshot,tree: String,feedback: String) {
         val limit = c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",w.id,w.correctionsUsed) {
             it.getInt(1)
         }.single()
@@ -446,7 +465,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         event(c,w.id,"CORRECTION_REQUESTED",bounded)
     }
 
-    private fun limit(workflow: String,generation: Int): Int = db.read { c ->
+    internal fun limit(workflow: String,generation: Int): Int = db.read { c ->
         c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",workflow,generation) { it.getInt(1) }.single()
     }
     private fun verificationUnknown(w: WorkflowSnapshot,reason: String): String {
@@ -463,17 +482,17 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         }
         return "UNKNOWN"
     }
-    private fun hold(c: Connection,id: String,reason: String) {
+    internal fun hold(c: Connection,id: String,reason: String) {
         c.mutate("UPDATE workflows SET hold='NEEDS_OWNER',hold_reason=?,version=version+1,updated_at=? WHERE workflow_id=? AND hold!='NEEDS_OWNER'",reason,now(),id)
         event(c,id,"ENGINE_NEEDS_OWNER",reason)
     }
-    private fun phase(c: Connection,id: String,phase: WorkflowPhase) {
+    internal fun phase(c: Connection,id: String,phase: WorkflowPhase) {
         c.mutate("UPDATE workflows SET phase=?,version=version+1,updated_at=? WHERE workflow_id=?",phase.name,now(),id)
     }
-    private fun bump(c: Connection,id: String) {
+    internal fun bump(c: Connection,id: String) {
         c.mutate("UPDATE workflows SET version=version+1,updated_at=? WHERE workflow_id=?",now(),id)
     }
-    private fun event(c: Connection,id: String,type: String,detail: String) {
+    internal fun event(c: Connection,id: String,type: String,detail: String) {
         c.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES (?,?,?,?)",id,type,detail,now())
     }
     private fun now(): String = Instant.now().toString()
