@@ -25,7 +25,7 @@ class PersonalServiceTest {
     private val github=object: ServiceGitHub {
         override fun issues()=records
         override fun authorized(issue: GitHubIssueRecord)=authorized
-        override fun postStatus(number: Int,body: String) { posts.add("$number:$body"); if(loseStatus) error("lost response") }
+        override fun postStatus(number: Int,body: String) { posts.add("$number:$body"); if(loseStatus) throw GitHubUnavailable("FAKE_LOST_RESPONSE") }
     }
     private val runtime=object: TaskRuntime {
         override fun prepare(issue: GitHubIssueRecord) { prepares++; if(crashPrepare) throw SimulatedCrash() }
@@ -34,6 +34,38 @@ class PersonalServiceTest {
     }
     private class SimulatedCrash: Error()
     private fun service()=PersonalService(database,github,runtime,{enabled})
+    @Test fun sqliteFailureIsRecordedAndStopsRestartWithoutMoreEffectsOrSecretText() {
+        val s=service()
+        RuntimeDatabase(database).write { it.mutate("""CREATE TRIGGER fail_state BEFORE UPDATE ON personal_tasks
+            BEGIN SELECT RAISE(ABORT,'FAKE_SECRET_IN_EXCEPTION'); END""") }
+        val failure=assertFailsWith<IllegalStateException> { guardedServiceCall(s) { s.tick() } }
+        assertTrue(failure.message!!.contains("INTERNAL_ERROR_STOPPED"))
+        assertFalse(failure.message!!.contains("FAKE_SECRET_IN_EXCEPTION"))
+        val saved=RuntimeDatabase(database).read { it.rows("SELECT diagnostic FROM personal_failures") { it.getString(1) }.single() }
+        assertTrue(saved.contains("SQLiteException")); assertFalse(saved.contains("FAKE_SECRET_IN_EXCEPTION"))
+        assertFails { service().recover() }; assertFails { service().tick() }
+        assertEquals(0,prepares); assertEquals(0,steps); assertEquals(1,posts.size)
+    }
+    @Test fun githubAccessRejectionRetainsNumericCauseAndStopsInsteadOfPolling() {
+        val s=service()
+        val failure=assertFailsWith<ServiceStopped> { guardedServiceCall(s) { throw GitHubRejected(403) } }
+        assertTrue(failure.message!!.startsWith("GITHUB_ACCESS_STOPPED_HTTP_403"))
+        assertTrue(readLocalServiceStatus(database).contains("GITHUB_REJECTED_HTTP_403"))
+        assertFails { service().tick() }; assertEquals(0,prepares)
+    }
+    @Test fun onlyTypedAvailabilityErrorIsRetryableBeforeEffects() {
+        val unavailable=object: ServiceGitHub {
+            override fun issues(): List<GitHubIssueRecord> = throw GitHubUnavailable("GITHUB_HTTP_503")
+            override fun authorized(issue: GitHubIssueRecord)=true
+            override fun postStatus(number: Int,body: String)=error("not called")
+        }
+        val s=PersonalService(database,unavailable,runtime,{true})
+        assertTrue(guardedServiceCall(s) { s.tick() }.startsWith("GITHUB_UNAVAILABLE_NO_ACTION"))
+        assertTrue(posts.isEmpty()); assertEquals(0,prepares)
+        val failure=assertFailsWith<IllegalStateException> { guardedServiceCall(s) { error("FAKE_SECRET") } }
+        assertFalse(failure.message!!.contains("FAKE_SECRET")); assertFails { service().tick() }
+    }
+
     @Test fun offAndUnauthorizedCannotCreateWork() {
         enabled=false; assertEquals("OFF",service().tick()); assertEquals(0,prepares)
         enabled=true; authorized=false; assertEquals("IDLE",service().tick()); assertTrue(posts.isEmpty())
@@ -60,7 +92,7 @@ class PersonalServiceTest {
         loseStatus=false
         val restarted=service(); restarted.recover(); repeat(3) { assertEquals("NEEDS_OWNER",restarted.tick()) }
         assertEquals(0,steps); assertEquals(0,prepares)
-        assertEquals(2,posts.size) // Original uncertain accepted + one held explanation.
+        assertEquals(2,posts.size) // Before P3: uncertain comment plus held explanation.
         assertTrue(readLocalServiceStatus(database).contains("STATUS_OUTCOME_UNKNOWN"))
     }
     @Test fun crashAfterPreparationIntentNeverReprepares() {
@@ -80,7 +112,7 @@ class PersonalServiceTest {
     }
     @Test fun statusPostCrashIntentIsRecoveredWithoutSendingAgain() {
         val s=service(); s.tick()
-        RuntimeDatabase(database).write { it.mutate("INSERT INTO personal_status VALUES (1017,'tests','sending')") }
+        RuntimeDatabase(database).write { it.mutate("INSERT INTO personal_status(issue_id,stage,state) VALUES (1017,'tests','sending')") }
         val restarted=service(); restarted.recover(); repeat(2) { restarted.tick() }
         assertEquals(0,steps); assertEquals(1,prepares)
         assertEquals(0,posts.count { it.contains("тестами") })

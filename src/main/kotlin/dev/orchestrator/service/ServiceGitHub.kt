@@ -9,6 +9,10 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.time.Duration
 
+/** Only a known transport failure or an explicit transient HTTP response is retryable on GET. */
+internal class GitHubUnavailable(val code: String) : RuntimeException(code)
+internal class GitHubRejected(val status: Int) : RuntimeException("GITHUB_HTTP_$status")
+
 internal interface ServiceGitHub {
     fun issues(): List<GitHubIssueRecord>
     fun authorized(issue: GitHubIssueRecord): Boolean
@@ -26,6 +30,7 @@ internal class PersonalGitHub(private val token: String, private val transport: 
         require(path==root || path.startsWith("$root/"))
         require(!path.contains("..") && !path.contains(':') && !path.contains('#'))
         require(method=="GET" || method=="POST" && path.matches(Regex("$root/issues/[1-9][0-9]*/comments")))
+        try {
         transport?.let { return it.request(method,path,body) }
         val req=HttpRequest.newBuilder(URI.create("https://api.github.com$path"))
             .timeout(Duration.ofSeconds(20)).header("Authorization","Bearer $token")
@@ -34,8 +39,17 @@ internal class PersonalGitHub(private val token: String, private val transport: 
             .method(method,if (body==null) HttpRequest.BodyPublishers.noBody() else HttpRequest.BodyPublishers.ofString(body)).build()
         val response=sendPublicationRequest(client,req)
         return PublicationResponse(response.statusCode(),response.body().toString(Charsets.UTF_8))
+        } catch (failure: Exception) {
+            val cause = if (failure is java.util.concurrent.ExecutionException) failure.cause else failure
+            if (cause is java.io.IOException) throw GitHubUnavailable("GITHUB_TRANSPORT_UNAVAILABLE")
+            throw failure
+        }
     }
-    private fun get(path: String): String = request("GET",path).let { check(it.status==200); it.body }
+    private fun get(path: String): String = request("GET",path).let {
+        if (it.status==429 || it.status in 500..599) throw GitHubUnavailable("GITHUB_HTTP_${it.status}")
+        if (it.status!=200) throw GitHubRejected(it.status)
+        it.body
+    }
     override fun issues(): List<GitHubIssueRecord> {
         val repo=mapper.readTree(get(root))
         require(repo.path("id").asLong()==SMOKE_TARGET.repositoryId && repo.path("full_name").asText()==SMOKE_TARGET.fullName &&
@@ -67,7 +81,7 @@ internal class PersonalGitHub(private val token: String, private val transport: 
     override fun postStatus(number: Int,body: String) {
         require(number>0 && body.length<=2000)
         val r=request("POST","$root/issues/$number/comments",mapper.writeValueAsString(mapOf("body" to body)))
-        check(r.status==201)
+        if (r.status!=201) throw GitHubRejected(r.status)
         val n=mapper.readTree(r.body)
         val id=n.path("id").asLong(); check(id>0 && n.path("body").asText()==body)
         val saved=mapper.readTree(get("$root/issues/comments/$id"))

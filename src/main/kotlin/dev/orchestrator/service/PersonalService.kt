@@ -29,7 +29,19 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             issue_id INTEGER NOT NULL REFERENCES personal_tasks(issue_id), stage TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN ('sending','confirmed','uncertain')),
             PRIMARY KEY(issue_id,stage))""")
+        c.mutate("""CREATE TABLE IF NOT EXISTS personal_failures(
+            id INTEGER PRIMARY KEY, recorded_at TEXT NOT NULL, diagnostic TEXT NOT NULL)""")
     } }
+    /** Store types and source locations, never arbitrary exception messages (may contain credentials). */
+    fun recordFailure(failure: Exception): String {
+        val diagnostic = safeServiceDiagnostic(failure)
+        db.write { it.mutate("INSERT INTO personal_failures(recorded_at,diagnostic) VALUES (?,?)",Instant.now().toString(),diagnostic) }
+        return diagnostic
+    }
+    private fun requireHealthy() {
+        val failure=db.read { it.rows("SELECT diagnostic FROM personal_failures ORDER BY id LIMIT 1") { it.getString(1) }.singleOrNull() }
+        if (failure!=null) throw ServiceStopped("SERVICE_STOPPED_REQUIRES_OWNER: $failure")
+    }
     private data class Task(val issue: GitHubIssueRecord,val state: String,val stage: String,val url: String?,val reason: String?)
     private fun tasks(): List<Task> = db.read { c -> c.rows("SELECT source,state,stage,url,reason FROM personal_tasks ORDER BY number") {
         val n=mapper.readTree(it.getString(1))
@@ -41,6 +53,7 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         c.mutate("UPDATE personal_tasks SET state='held',stage='held',reason=? WHERE issue_id=?",reason,i.githubIssueId)
     }
     fun recover() {
+        requireHealthy()
         for(t in tasks()) {
             val pending=db.read { c -> c.rows("SELECT 1 FROM personal_status WHERE issue_id=? AND state!='confirmed'",t.issue.githubIssueId) { 1 }.isNotEmpty() }
             if (pending) {
@@ -48,10 +61,11 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
                 hold(t.issue,"STATUS_OUTCOME_UNKNOWN")
             }
             if(t.state=="preparing") hold(t.issue,"PREPARATION_INTERRUPTED")
-            if(t.state=="active") try { runtime.recover(t.issue) } catch(_: Exception) { hold(t.issue,"RECOVERY_NEEDS_OWNER") }
+            if(t.state=="active" && !pending) runtime.recover(t.issue)
         }
     }
     fun tick(): String {
+        requireHealthy()
         if(!permitted()) return "OFF"
         // An unresolved task blocks the entire one-worker queue, including different task databases.
         val previous=tasks()
@@ -76,8 +90,8 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             task=tasks().single { it.issue.githubIssueId==next.githubIssueId }
         }
         val i=task.issue
+        if(!github.authorized(i)) { hold(i,"OWNER_LABEL_OR_ISSUE_CHANGED"); status(i,"held"); return "NEEDS_OWNER" }
         try {
-            if(!github.authorized(i)) { hold(i,"OWNER_LABEL_OR_ISSUE_CHANGED"); status(i,"held"); return "NEEDS_OWNER" }
             if(!status(i,task.stage,task.url)) return "NEEDS_OWNER"
             if(!permitted()) return "OFF"
             if(task.state=="accepted") {
@@ -94,10 +108,9 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             val now=tasks().single { it.issue.githubIssueId==i.githubIssueId }
             status(i,now.stage,now.url)
             return now.state.uppercase()
-        } catch(_: Exception) {
-            hold(i,"ACTION_INTERRUPTED_OR_DENIED")
-            status(i,"held")
-            return "NEEDS_OWNER"
+        } catch(failure: Exception) {
+            hold(i,"INTERNAL_ACTION_ERROR")
+            throw IllegalStateException("ACTION_STOPPED_REQUIRES_OWNER",failure)
         }
     }
     private fun status(i: GitHubIssueRecord,stage: String,url: String?=null): Boolean {
@@ -122,14 +135,16 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         }
         // Intent BEFORE POST. Lost response or crash never permits another POST for this stage.
         db.write { it.mutate("INSERT INTO personal_status(issue_id,stage,state) VALUES (?,?,'sending')",i.githubIssueId,stage) }
-        return try {
+        try {
             github.postStatus(i.issueNumber,"DevOrchestrator: $text")
-            db.write { it.mutate("UPDATE personal_status SET state='confirmed' WHERE issue_id=? AND stage=? AND state='sending'",i.githubIssueId,stage) }
-            true
-        } catch(_: Exception) {
+        } catch(failure: Exception) {
             db.write { it.mutate("UPDATE personal_status SET state='uncertain' WHERE issue_id=? AND stage=?",i.githubIssueId,stage) }
-            hold(i,"STATUS_OUTCOME_UNKNOWN"); false
+            hold(i,"STATUS_OUTCOME_UNKNOWN")
+            if (failure is GitHubUnavailable || failure is GitHubRejected) return false
+            throw failure
         }
+        db.write { check(it.mutate("UPDATE personal_status SET state='confirmed' WHERE issue_id=? AND stage=? AND state='sending'",i.githubIssueId,stage)==1) }
+        return true
     }
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
 }
