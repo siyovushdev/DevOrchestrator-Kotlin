@@ -35,6 +35,7 @@ jobs:
           native_cli="$RUNNER_TEMP/devorch-native-codex/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
           test -x "$native_cli"
           echo "DEVORCH_CODEX_ISOLATION_BINARY=$native_cli" >> "$GITHUB_ENV"
+          echo "DEVORCH_REMOTE_NATIVE_CANARY_BINARY=$native_cli" >> "$GITHUB_ENV"
       - name: Installed native Codex child canary (targeted first)
         shell: bash
         run: |
@@ -52,6 +53,8 @@ jobs:
                   print(failure.attrib.get('message', ''))
           PYXML
           exit "$canary_status"
+      - name: Remote protocol regressions and native permission canary (no inference)
+        run: gradle --no-daemon test --tests dev.orchestrator.remote.RemoteWorkerTest --tests dev.orchestrator.service.PersonalConfigTest
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
       - name: PERSONAL distribution stays OFF without credentials

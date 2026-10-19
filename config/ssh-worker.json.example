@@ -1,0 +1,5 @@
+{
+  "root": "/home/vboxuser/.local/state/devorch-worker",
+  "modelHome": "/home/vboxuser/devorch-model-home",
+  "codex": "/REPLACE_WITH_REVIEWED_ABSOLUTE_NATIVE_CODEX_BINARY"
+}

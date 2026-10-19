@@ -29,6 +29,8 @@ private fun executeServiceCommand(args: Array<String>) {
         println(result?.let { "CONFIRMED_REMOTE: ${it.id} ${it.url}; use resume-status explicitly" } ?: "NEEDS_OWNER: exact unique comment not confirmed")
         return
     }
+    if(config.runtimeMode=="ssh-vm" && (config.enabled || command=="resume-status"))
+        throw ServiceStopped("REMOTE_WORKFLOW_BRIDGE_NOT_READY: SSH protocol stage only; queue execution disabled")
     ServiceLock(config.root).use {
         if(!config.enabled && command!="resume-status") { println("PERSONAL autonomy OFF"); return }
         check(System.getProperty("user.name")=="devorch-e2e") { "Dedicated PERSONAL account required" }
