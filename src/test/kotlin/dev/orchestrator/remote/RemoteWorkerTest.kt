@@ -312,6 +312,20 @@ print('NATIVE_PERMISSION_CANARY_PASS_NO_INFERENCE')
         assertFalse(Files.exists(calls))
         assertFalse(Files.exists(root.resolve("a1/policy-receipt.json")))
     }
+    @Test fun modelCredentialAliasesAreRejectedBeforeAnyRoleCanStart() {
+        setup()
+        val original=home.resolve(".codex")
+        val external=temp.resolve("external-model-config")
+        Files.move(original,external); Files.createSymbolicLink(original,external)
+        val j=journal()
+        assertFailsWith<RemoteExchangeUnknown> { client(j).submit(request("TESTS")) { true } }
+        assertFalse(Files.exists(root.resolve("a1"))); assertFalse(Files.exists(calls))
+        Files.delete(original); Files.move(external,original)
+        val auth=original.resolve("auth.json"); Files.move(auth,temp.resolve("external-auth"))
+        Files.createSymbolicLink(auth,temp.resolve("external-auth"))
+        assertFails { transport().exchange(query(request("TESTS",attempt="other")),3000) }
+        assertFalse(Files.exists(root.resolve("other")))
+    }
     @Test fun sshOptionsPinHostAndKeyAndDoNotDelegateAgentOrIssueCommands() {
         val key=privateFile(temp.resolve("fake-key"),"not a real key")
         val hosts=privateFile(temp.resolve("known-hosts"),"artificial host pin")

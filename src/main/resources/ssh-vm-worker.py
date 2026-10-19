@@ -94,6 +94,14 @@ def config(path):
     for exposed in (Path('/usr'), Path('/bin').resolve(), Path('/sbin').resolve(), Path('/lib').resolve(), Path('/lib64').resolve(), Path('/proc'), Path('/dev'), Path('/sys'), Path('/etc')):
         if any(p == exposed or exposed in p.parents for p in (root, home)):
             raise ValueError('state/model HOME overlaps minimal OS mounts')
+    model = home / '.codex'
+    if model.is_symlink() or (model.exists() and (not model.is_dir() or model.resolve() != model)):
+        raise ValueError('canonical dedicated Codex directory required')
+    auth = model / 'auth.json'
+    if auth.exists() or auth.is_symlink():
+        metadata = auth.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError('regular private model auth required')
     if not root.is_dir() or not home.is_dir() or root == home or root in home.parents or home in root.parents:
         raise ValueError('overlapping roots')
     if any(p.stat().st_uid != os.getuid() or p.stat().st_mode & 0o077 for p in (root, home)) or INSTALL in root.parents or root == INSTALL or root in INSTALL.parents:
