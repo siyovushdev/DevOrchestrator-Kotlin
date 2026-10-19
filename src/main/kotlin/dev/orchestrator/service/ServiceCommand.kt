@@ -14,8 +14,8 @@ internal fun serviceCommand(args: Array<String>) {
 private fun executeServiceCommand(args: Array<String>) {
     val command=args.firstOrNull()
     require((command in setOf("service","run","status") && args.size==2) ||
-        (command=="check-status" && args.size==4) || (command=="resume-status" && args.size==5)) {
-        "Usage: service|run|status CONFIG; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID"
+        (command in setOf("check-status","check-remote") && args.size==4) || (command in setOf("resume-status","resume-remote") && args.size==5)) {
+        "Usage: service|run|status CONFIG; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
     }
     val file=Path.of(args[1]); require(file.isAbsolute)
     val config=PersonalConfig.read(file)
@@ -29,10 +29,8 @@ private fun executeServiceCommand(args: Array<String>) {
         println(result?.let { "CONFIRMED_REMOTE: ${it.id} ${it.url}; use resume-status explicitly" } ?: "NEEDS_OWNER: exact unique comment not confirmed")
         return
     }
-    if(config.runtimeMode=="ssh-vm" && (config.enabled || command=="resume-status"))
-        throw ServiceStopped("REMOTE_WORKFLOW_BRIDGE_NOT_READY: SSH protocol stage only; queue execution disabled")
     ServiceLock(config.root).use {
-        if(!config.enabled && command!="resume-status") { println("PERSONAL autonomy OFF"); return }
+        if(!config.enabled && command !in setOf("resume-status","check-remote","resume-remote")) { println("PERSONAL autonomy OFF"); return }
         check(System.getProperty("user.name")=="devorch-e2e") { "Dedicated PERSONAL account required" }
         val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
         val github=PersonalGitHub(token)
@@ -44,7 +42,14 @@ private fun executeServiceCommand(args: Array<String>) {
             println(if (service.resumeStatus(args[2].toInt(),args[3],args[4].toLong())) "STATUS_RECONCILED: start service separately" else "NEEDS_OWNER: not confirmed")
             return
         }
-        dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
+        if(command=="check-remote") {
+            println(service.checkRemote(args[2].toInt(),args[3])); return
+        }
+        if(command=="resume-remote") {
+            println(if(service.resumeRemote(args[2].toInt(),args[3],args[4])) "REMOTE_RESULT_ACCEPTED: start service separately" else "NEEDS_OWNER: exact result not accepted")
+            return
+        }
+        if(config.runtimeMode=="local") dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
         guardedServiceCall(service) { service.recover(); "RECOVERED" }
         do {
             val state=guardedServiceCall(service) { service.tick() }

@@ -11,6 +11,7 @@ internal data class PersonalConfig(
     val enabled: Boolean, val root: Path, val home: Path, val codex: Path,
     val model: String, val minimumTests: Int, val proxyPort: Int, val pollSeconds: Long,
     val runtimeMode: String = "local",
+    val ssh: dev.orchestrator.remote.SshWorkerConfig? = null,
 ) {
     companion object {
         fun read(file: Path): PersonalConfig {
@@ -42,7 +43,9 @@ internal data class PersonalConfig(
             val minimum=p.getProperty("minimumTests","1").toInt(); require(minimum in 1..10000)
             val port=p.getProperty("proxyPort","10809").toInt(); require(port in 1..65535)
             val poll=p.getProperty("pollSeconds","90").toLong(); require(poll in 60..120)
-            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode)
+            val ssh=if(mode=="ssh-vm") dev.orchestrator.remote.SshWorkerConfig(
+                Path.of(requireNotNull(p.getProperty("sshIdentityFile"))),Path.of(requireNotNull(p.getProperty("sshKnownHosts")))) else null
+            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode,ssh)
         }
     }
 }
