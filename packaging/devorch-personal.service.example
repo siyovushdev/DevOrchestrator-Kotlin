@@ -11,6 +11,8 @@ ExecStart=%h/personal-service/app/bin/dev-orchestrator-kotlin service %h/persona
 EnvironmentFile=%h/personal-service/controller.env
 UMask=0077
 Restart=on-failure
+# Fatal controller/configuration errors require Owner inspection, not a restart loop.
+RestartPreventExitStatus=70
 RestartSec=30
 KillMode=control-group
 TimeoutStopSec=150

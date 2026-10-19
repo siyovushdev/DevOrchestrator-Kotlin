@@ -3,9 +3,8 @@
 Only this parent receives the final report path. Discovery and each selected test run
 in bounded-protocol child interpreters covered by the existing Linux supervisor.
 A clean early worker exit without its complete result is UNKNOWN, not a test PASS.
-Arbitrary test semantics and in-worker Python remain untrusted; this is not hostile-code
-method-entry attestation or a filesystem/credential sandbox. Protected controller
-artifacts and the separately approved disposable OS context remain prerequisites.
+Arbitrary in-worker Python remains untrusted. Every worker is launched through the
+controller-supplied bubblewrap command; reports and credentials stay outside it.
 """
 import hashlib
 import json
@@ -42,14 +41,15 @@ else:
 print(json.dumps(result))
 '''
 
-source, report_name, minimum = sys.argv[1:]
+source, report_name, minimum, isolation_json = sys.argv[1:]
+isolation = json.loads(isolation_json)
 report = Path(report_name)
 MAX_PROTOCOL = 1024 * 1024
 
 def invoke(*args):
     # No final-report path, descriptor or environment variable reaches the worker.
     # stderr streams directly to the outer bounded observer; stdout is a bounded protocol.
-    worker = subprocess.Popen([sys.executable, '-I', '-B', '-c', WORKER, *args], cwd=source,
+    worker = subprocess.Popen(isolation + [sys.executable, '-I', '-B', '-c', WORKER, *args], cwd=source,
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, close_fds=True)
     raw = worker.stdout.read(MAX_PROTOCOL + 1)
     if len(raw) > MAX_PROTOCOL:

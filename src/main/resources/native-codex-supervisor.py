@@ -69,6 +69,7 @@ def run(config):
                              start_new_session=True)  # stdin/out/err inherited from Kotlin pipes
     root = identity(child.pid)
     root_exit = None
+    root_exit_at = None
     reaped = 0
     cleanup_deadline = None
     clean = False
@@ -86,12 +87,16 @@ def run(config):
             reaped += 1
             if pid == child.pid:
                 root_exit = os.waitstatus_to_exitcode(status)
+                root_exit_at = time.monotonic()
                 child.returncode = root_exit
         if clean:
             break
         if time.monotonic() - started >= config["timeout_ms"] / 1000:
             cause = cause or "timeout"
-        if root_exit is not None:
+        # bwrap's namespace monitor can outlive its outer parent briefly. Wait for
+        # ECHILD, never mistake a normal namespace teardown race for a live worker.
+        grace = 0.5 if config.get("namespace_boundary") else 0
+        if root_exit is not None and time.monotonic() - root_exit_at >= grace:
             cause = cause or "descendants_after_exit"
         if cause:
             cleanup_deadline = cleanup_deadline or time.monotonic() + 5

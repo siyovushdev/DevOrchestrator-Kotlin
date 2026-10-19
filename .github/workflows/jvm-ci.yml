@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04 hosted runner currently denies bwrap netns (RTM_NEWADDR EPERM).
+    # Keep mandatory boundary tests on supported Ubuntu; never disable host AppArmor.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -21,6 +23,35 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.0'
+      - name: Linux execution boundary
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / -- /usr/bin/true
+      - name: Installed native Codex sandbox fixture (no inference or credentials)
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/devorch-native-codex" --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0-linux-x64
+          native_cli="$RUNNER_TEMP/devorch-native-codex/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
+          test -x "$native_cli"
+          echo "DEVORCH_CODEX_ISOLATION_BINARY=$native_cli" >> "$GITHUB_ENV"
+      - name: Installed native Codex child canary (targeted first)
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon test --tests dev.orchestrator.agent.nativecli.InstalledCodexIsolationTest
+          canary_status=$?
+          python3 - <<'PYXML'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          report = Path('build/test-results/test/TEST-dev.orchestrator.agent.nativecli.InstalledCodexIsolationTest.xml')
+          if report.exists():
+              suite = ElementTree.parse(report).getroot()
+              print('INSTALLED_CODEX_CANARY_COUNTS', suite.attrib)
+              for failure in suite.findall('.//failure'):
+                  print(failure.attrib.get('message', ''))
+          PYXML
+          exit "$canary_status"
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
       - name: PERSONAL distribution stays OFF without credentials

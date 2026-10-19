@@ -127,22 +127,22 @@ assert not any(k in os.environ for k in ['GITHUB_TOKEN','GH_TOKEN','SSH_AUTH_SOC
         val result = runner(Duration.ofMillis(500)).run("attempt")
         assertEquals(AttemptState.FAILED,result.state,result.reason)
         assertTrue(result.reason.contains("timeout"),result.reason)
-        val descendant = Files.readString(clone.resolve("detached.pid")).trim().toLong()
-        assertFalse(ProcessHandle.of(descendant).map { it.isAlive }.orElse(false))
+        // Child PIDs belong to the private namespace; never interpret them as host PIDs.
+        assertTrue(Files.exists(clone.resolve("detached.pid")))
         assertEquals(0,claimCount())
         assertEquals(WorkflowHold.NEEDS_OWNER,store.findWorkflow(repo,1)?.hold)
         val receipt = ObjectMapper().readTree(Files.readString(result.artifacts!!.resolve("supervisor-receipt.json")))
         assertTrue(receipt["cleanup_echild"].asBoolean())
-        assertTrue(receipt["reaped"].asInt()>=3)
+        assertTrue(receipt["reaped"].asInt()>=1) // bwrap owns/reaps namespace descendants
     }
 
-    @Test fun rootExitWithLiveDetachedChildIsNotSuccessEvenWhenRootExitIsZero() {
+    @Test fun namespaceExitCleansDetachedChildrenBeforeSuccess() {
         setup(detached+"\nlast.write_text('root exit is not sufficient')\n")
         val result = runner().run("attempt")
-        assertEquals(AttemptState.FAILED,result.state,result.reason)
-        assertTrue(result.reason.contains("descendants_after_exit"),result.reason)
-        val pid = Files.readString(clone.resolve("detached.pid")).trim().toLong()
-        assertFalse(ProcessHandle.of(pid).map { it.isAlive }.orElse(false))
+        assertEquals(AttemptState.SUCCEEDED,result.state,result.reason)
+        assertTrue(Files.exists(clone.resolve("detached.pid")))
+        val receipt=ObjectMapper().readTree(Files.readString(result.artifacts!!.resolve("supervisor-receipt.json")))
+        assertTrue(receipt["cleanup_echild"].asBoolean())
     }
 
     @Test fun outputLimitStopsAndReapsChildWhileKeepingLogBounded() {
@@ -154,10 +154,10 @@ assert not any(k in os.environ for k in ['GITHUB_TOKEN','GH_TOKEN','SSH_AUTH_SOC
         assertEquals(0,claimCount())
     }
 
-    @Test fun supervisorDeathRetainsUnknownClaimsAndNeverRestartsChild() {
+    @Test fun sandboxInitDeathCannotKillOuterSupervisorAndNeverRestartsChild() {
         setup("\nos.kill(os.getppid(), signal.SIGKILL)\nos._exit(0)\n")
         val result = runner().run("attempt")
-        assertEquals(AttemptState.UNKNOWN,result.state)
+        assertEquals(AttemptState.UNKNOWN,result.state,result.reason)
         assertEquals(1,claimCount())
         assertEquals(WorkflowHold.NEEDS_OWNER,store.findWorkflow(repo,1)?.hold)
         assertNull(runner().run("attempt").state)
