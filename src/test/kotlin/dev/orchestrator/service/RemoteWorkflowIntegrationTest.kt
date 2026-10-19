@@ -287,9 +287,12 @@ class Boundary(unittest.TestCase):
         assertFails { s.resumeRemote(17,id,checked.substringAfter(':')) }
         assertEquals(1,submissions); assertEquals(WorkflowHold.NEEDS_OWNER,SqliteTaskStore(db(i)).findWorkflow(1424152600,17)!!.hold)
     }
-    @Test fun completedInnerOwnerImportCanFinishOuterQueueResumeAfterCrash() {
-        setup(); val i=issue(17); var s=service(listOf(i)); s.tick(); loseRole="CODING"; s.tick()
-        val id=actionId(i,"CODING"); val checked=s.checkRemote(17,id); checkpoint="AFTER_COMMIT"
+    @Test fun completedInnerOwnerImportCanFinishOuterQueueResumeAfterCrash() = completedOwnerImport("CODING",1)
+    @Test fun completedTestsOwnerImportCanFinishOuterQueueResumeAfterCrash() = completedOwnerImport("TESTS",2)
+    @Test fun completedReviewOwnerImportCanFinishOuterQueueResumeAfterCrash() = completedOwnerImport("REVIEW",3)
+    private fun completedOwnerImport(role: String,steps: Int) {
+        setup(); val i=issue(17); var s=service(listOf(i)); s.tick(); repeat(steps-1) { s.tick() }; loseRole=role; s.tick()
+        val id=actionId(i,role); val checked=s.checkRemote(17,id); checkpoint="AFTER_COMMIT"
         assertFailsWith<Error> { s.resumeRemote(17,id,checked.substringAfter(':')) }
         s=service(listOf(i)); s.recover()
         assertTrue(s.resumeRemote(17,id,checked.substringAfter(':')))
@@ -359,6 +362,16 @@ class Boundary(unittest.TestCase):
         Files.writeString(manifest,original.replace(base,"a".repeat(40)))
         assertFails { s.tick() }; assertEquals(1,submissions); assertEquals(0,posts)
         assertTrue(RuntimeDatabase(db(i)).read { c -> c.rows("SELECT 1 FROM workflow_verifications") { 1 }.isEmpty() })
+    }
+
+    @Test fun idempotentOuterResumeStillHonorsRevokedPolicyAfterInnerCommit() {
+        setup(); val i=issue(17); var s=service(listOf(i)); s.tick(); loseRole="CODING"; s.tick()
+        val id=actionId(i,"CODING"); val checked=s.checkRemote(17,id); checkpoint="AFTER_COMMIT"
+        assertFailsWith<Error> { s.resumeRemote(17,id,checked.substringAfter(':')) }
+        val store=SqliteTaskStore(db(i)); val policy=store.findPolicy(1424152600)!!
+        assertTrue(store.updatePolicyFromTrustedOwner(policy.copy(version=policy.version+1,personalAutoExecution=false),policy.version,"owner:fixture","fixture policy revoked"))
+        s=service(listOf(i)); assertFalse(s.resumeRemote(17,id,checked.substringAfter(':')))
+        assertTrue(s.localStatus().contains("REMOTE_ACTION_UNKNOWN:$id")); assertEquals(1,submissions); assertEquals(0,posts)
     }
 
 }

@@ -131,11 +131,19 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     fun resume(id: String,digest: String): Boolean {
         require(RemoteProtocol.sha(digest,64))
         val a=action(id) ?: return false
-        if(a["state"].asText()=="IMPORTED") return a["ownerDigest"].asText()==digest && engine.ownerGo()
         val saved=journal.find(id) ?: return false
         if(saved.state!="EVIDENCE_STORED" || RemoteProtocol.digest(saved.evidence!!)!=digest || !engine.ownerGo()) return false
         val identity=saved.request.json["identity"]
         val workflow=engine.store.findWorkflow(engine.repositoryId,identity["issueNumber"].asInt()) ?: return false
+        if(a["state"].asText()=="IMPORTED") {
+            val context=mapper.readTree(a["context"].asText())
+            val role=if(identity["role"].asText()=="REVIEW") AgentRole.REVIEW else AgentRole.CODING
+            return a["ownerDigest"].asText()==digest && site(engine.database,workflow.id)==settings.peer &&
+                workflow.id==identity["workflowId"].asText() && workflow.version==context["workflowVersion"].asLong()+2 &&
+                (workflow.hold==WorkflowHold.NONE || workflow.holdReason in setOf("CORRECTION_LIMIT","CORRECTION_LIMIT_OR_REVIEW_BINDING")) &&
+                db.read { c -> engine.policyCurrent(c,context["policyVersion"].asLong()) &&
+                    mapper.readTree(mapper.writeValueAsBytes(engine.catalog.findAssignedProfile(c,engine.repositoryId,role)))==context["assigned"] }
+        }
         if(workflow.hold==WorkflowHold.NONE) recover(identity["issueNumber"].asInt()) // exact pending intent after crash, no submission
         complete(id,digest); return true
     }
