@@ -211,23 +211,34 @@ spec=importlib.util.spec_from_file_location('worker',${RemoteProtocol.mapper.wri
 w=importlib.util.module_from_spec(spec); spec.loader.exec_module(w)
 c=w.config(Path(${RemoteProtocol.mapper.writeValueAsString(config.toString())}))
 c['codex']=${RemoteProtocol.mapper.writeValueAsString(binary)}
-# Pinned CLI refuses automatic helper aliases under /tmp. Explicit fixture alias
-# only; production uses its dedicated non-temporary guest HOME.
-aliases=Path(c['modelHome'])/'fixture-bin'; aliases.mkdir()
-(aliases/'codex-linux-sandbox').symlink_to(c['codex'])
-base_env=w.env
-def fixture_env(home='/nonexistent'):
-    result=base_env(home); result['PATH']=str(aliases)+':'+result['PATH']; return result
-w.env=fixture_env
+# Match the production installation/state topology, all outside denied tmp.
+# This temporary HOME subdirectory contains public helpers and fake auth only.
+import tempfile, shutil, atexit
+os.umask(0o077)
+fixture=Path(tempfile.mkdtemp(prefix='.devorch-native-canary-',dir=Path(${RemoteProtocol.mapper.writeValueAsString(System.getProperty("user.home"))})))
+atexit.register(shutil.rmtree,fixture)
+installed=fixture/'install'; installed.mkdir()
+for name in ('ssh-vm-worker.py','native-codex-supervisor.py','verify-python-unittest.py'):
+    shutil.copyfile(w.INSTALL/name,installed/name)
+w.INSTALL=installed
+original_root=Path(c['root'])
+state=fixture/'state'; state.mkdir(mode=0o700)
+home=fixture/'model-home'; home.mkdir(mode=0o700); (home/'.codex').mkdir()
+w.write(home/'.codex/auth.json',b'ARTIFICIAL_AUTH_ONLY')
+c.update(root=str(state),modelHome=str(home))
+configuration=fixture/'config.json'; w.write(configuration,w.encoded(c)); c=w.config(configuration)
 stdout,stderr=os.dup(1),os.dup(2)
 for role in ('CODING','REVIEW'):
     a=Path(c['root'])/('native-canary-'+role); a.mkdir(mode=0o700)
     w.write(a/'request.json',b'ARTIFICIAL_WORKER_STATE')
-    source=a/'source'; source.mkdir()
+    source=a/'source'; source.mkdir(); w.git(source,'init','--template=')
     try:
         w.native_policy(c,source,a,role,w.supervisor_module())
     finally:
         os.dup2(stdout,1); os.dup2(stderr,2)
+        observed=original_root/('native-canary-'+role); observed.mkdir()
+        for name in ('policy.log','policy-receipt.json'):
+            if (a/name).exists(): shutil.copyfile(a/name,observed/name)
 print('NATIVE_PERMISSION_CANARY_PASS_NO_INFERENCE')
 """)
         val output=try { WorkerWireProcess.exchange(listOf("/usr/bin/python3","-I","-S",driver.toString()),"{}".toByteArray(),30000) }

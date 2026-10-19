@@ -240,6 +240,17 @@ def native_policy(c, source, attempt, role, supervisor):
     for path in (home / '.codex' / 'config.toml', Path('/etc/codex/config.toml'), Path('/etc/codex/managed_config.toml')):
         if path.exists() or path.is_symlink():
             raise ValueError('review dedicated Codex configuration first')
+    # Codex 0.163 may exec this standard argv0 helper by PATH inside bwrap.
+    # Keep only that alias readable, outside credential HOME and denied tmp roots.
+    helpers = INSTALL / 'native-bin'
+    helpers.mkdir(mode=0o700, exist_ok=True)
+    if helpers.resolve() != helpers or helpers.stat().st_mode & 0o077:
+        raise ValueError('private helper directory required')
+    alias = helpers / 'codex-linux-sandbox'
+    if not alias.is_symlink() and not alias.exists():
+        alias.symlink_to(c['codex'])
+    if set(helpers.iterdir()) != {alias} or not alias.is_symlink() or alias.resolve() != Path(c['codex']):
+        raise ValueError('native helper alias mismatch')
     access = 'write' if role == 'CODING' else 'read'
     binaries = [Path(c['codex'])]
     parent = binaries[0].parent
@@ -247,7 +258,7 @@ def native_policy(c, source, attempt, role, supervisor):
         helper = (parent / name).resolve()
         if helper.is_file():
             binaries.append(helper)
-    binary_rules = ''.join(',' + json.dumps(str(p)) + '="read"' for p in binaries)
+    binary_rules = ''.join(',' + json.dumps(str(p)) + '="read"' for p in [*binaries, helpers])
     profile = ('permissions.devorch={extends=":workspace",filesystem={":root"="deny",'
                '":minimal"="read",":tmpdir"="deny",":slash_tmp"="deny",'
                '":workspace_roots"={"."="' + access + '"}' + binary_rules + '},network={enabled=false}}')
@@ -260,6 +271,7 @@ def native_policy(c, source, attempt, role, supervisor):
         raise ValueError('canary changed')
     # Exact-file tests, not globs. A read-only profile must also deny source writes.
     probe = source / ('devorch-policy-probe-' + os.urandom(12).hex())
+    write(probe, b'public-source-probe')
     script = ("from pathlib import Path\n"
               "for text in " + repr([str(canary), str(attempt / 'request.json'), str(INSTALL / 'ssh-vm-worker.py'),
                                     '/proc/self/root' + str(canary), '/proc/' + str(os.getpid()) + '/environ']) + ":\n"
@@ -270,23 +282,28 @@ def native_policy(c, source, attempt, role, supervisor):
               " try: p.open('r+b')\n"
               " except OSError: pass\n"
               " else: raise SystemExit(92)\n"
-              "p=Path(" + repr(str(probe)) + ")\n")
+              "p=Path(" + repr(str(alias)) + ")\n"
+              "try: p.open('r+b')\nexcept OSError: pass\nelse: raise SystemExit(94)\n"
+              "try: p.unlink()\nexcept OSError: pass\nelse: raise SystemExit(95)\n"
+              "p=Path(" + repr(str(probe)) + ")\nassert p.read_bytes()==b'public-source-probe'\n")
     if role == 'CODING':
-        script += "p.write_bytes(b'probe'); assert p.read_bytes()==b'probe'; p.unlink()\n"
+        script += "p.write_bytes(b'probe'); assert p.read_bytes()==b'probe'; p.write_bytes(b'public-source-probe')\n"
     else:
         script += "try: p.write_bytes(b'probe')\nexcept OSError: pass\nelse: raise SystemExit(93)\n"
     argv = [c['codex'], 'sandbox', *overrides,
             '--', '/usr/bin/python3', '-I', '-S', '-c', script]
     child_env = env(str(home))
     child_env['CODEX_HOME'] = str(home / '.codex')
+    child_env['PATH'] = str(helpers) + ':' + child_env['PATH']
     with (attempt / 'policy.log').open('xb') as output:
         os.dup2(output.fileno(), 1)
         os.dup2(output.fileno(), 2)
         raw = supervisor.run({'argv': argv, 'cwd': str(source), 'env': child_env,
                               'timeout_ms': 10000, 'namespace_boundary': True})
     write(attempt / 'policy-receipt.json', encoded(raw))
-    if raw.get('exit_code') != 0 or raw.get('cause') != 'exited' or not raw.get('cleanup_echild') or probe.exists() or read(canary, 64) != b'ARTIFICIAL_POLICY_SECRET':
+    if raw.get('exit_code') != 0 or raw.get('cause') != 'exited' or not raw.get('cleanup_echild') or read(probe, 64) != b'public-source-probe' or read(canary, 64) != b'ARTIFICIAL_POLICY_SECRET':
         raise ValueError('native permission policy not enforced')
+    probe.unlink()
     return overrides
 
 
@@ -327,6 +344,7 @@ def execute(c, attempt):
             argv += ['-']  # new exec session; never resume a Coding session for Review
             child_env = env(home)
             child_env['CODEX_HOME'] = str(Path(home) / '.codex')
+            child_env['PATH'] = str(INSTALL / 'native-bin') + ':' + child_env['PATH']
         write(attempt / 'prompt', r['prompt'].encode())
         # Kernel bounds each captured file, including adversarial CLI output. No nested Codex bwrap.
         with (attempt / 'prompt').open('rb') as stdin, (attempt / 'events.log').open('xb') as stdout, (attempt / 'stderr.log').open('xb') as stderr:

@@ -58,7 +58,11 @@ The guest supports three fixed roles:
 - REVIEW: separate `codex exec`, native read-only workspace profile; new session
   must differ from the Coding session, and source tree must remain unchanged.
 
-There is **no outer bwrap around Codex**. Native permission profiles deny general
+There is **no outer bwrap around Codex**. The worker maintains the standard
+`codex-linux-sandbox` argv0 symlink in its private non-temporary `native-bin/`
+installation subdirectory. Only this public-code directory and the Owner-configured native
+binaries/helpers are readable; this exception exposes no model HOME or state.
+The canary also checks that the alias cannot be modified or removed. Native permission profiles deny general
 filesystem reads, permit minimal system tools and the current workspace only,
 and deny tool network. Legacy sandbox flags are deliberately not mixed with
 profiles; dedicated user/system `config.toml` / `managed_config.toml` are refused.
@@ -92,7 +96,8 @@ never print raw request, stdout or stderr in Owner status messages.
 
 No `EVIDENCE_STORED` record may be consumed by Publisher until these are complete.
 Worker receipts are statements from a trusted installed worker over pinned SSH,
-not signatures or hardware attestation. OS protection of that worker's files from
+not signatures or hardware attestation. The resource digest covers the three Python
+resources; it does not attest the bytes of the Owner-configured Codex executable. OS protection of that worker's files from
 native tool commands is a deployment precondition; fake CLI tests cannot prove it.
 
 ## Deployment preparation — instructions only, not performed
@@ -110,7 +115,7 @@ After separate Owner/admin approval of placement and a **no-model protocol canar
    another route around the native sandbox. Never bind/share host HOME, WORK/1MT,
    host sockets or host SSH-agent into the guest.
 2. Manually create private `~/.config/devorch-worker.json` using the schema in
-   `config/ssh-worker.json.example`; canonical root/modelHome must exist, be
+   `config/ssh-worker.json.example`; canonical non-temporary root/modelHome must exist, be
    disjoint, root/modelHome private 0700, config 0600. Keep both outside minimal OS mounts (`/usr`, `/etc`, etc.). Use a native absolute Codex executable outside temporary directories (deny-tmp can hide an executable placed there);
    authenticate only that guest's dedicated model HOME. No controller GitHub PAT.
    Review managed requirements and keep unrelated plugins/MCP/credentials absent.
