@@ -243,8 +243,16 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         val r=journal.find(id)!!.request.json["identity"]
         val coding=if(r["role"].asText()=="CODING") id else mapper.readTree(action(id)!!["context"].asText())["codingAttemptId"].asText()
         val path=engine.artifactRoot.resolve("remote-$id/candidates/$coding-${if(r["role"].asText()=="CODING") "untested" else "candidate"}")
-        // Reopen with the manifest's independently recomputed digest; binding is checked against saved request/result.
+        val saved=journal.find(id)!!; check(saved.state=="EVIDENCE_STORED")
+        val result=mapper.readTree(saved.evidence)
+        val status=if(r["role"].asText()=="CODING") VerificationStatus.NOT_RUN
+            else if(testResult(saved.request,result)["pass"].asBoolean()) VerificationStatus.PASS else VerificationStatus.FAIL
+        val session=if(r["role"].asText()=="CODING") remoteSession(result) else r["codingSessionId"].asText()
+        val expected=CandidateBinding(r["workflowId"].asText(),coding,session,r["generation"].asInt(),r["baseSha"].asText(),
+            result["outputTree"].asText(),status,"$coding-tests")
+        // A self-consistent manifest is insufficient: compare its entire binding with durable guest facts.
         return FrozenCandidate.reopen(path,RemoteProtocol.digest(RemoteProtocol.file(path.resolve("manifest"),1_048_576)))
+            .also { check(it.binding==expected) { "REMOTE_IMPORTED_BINDING_CHANGED" } }
     }
     private fun action(id: String): JsonNode?=db.read { c -> c.rows("SELECT context,state,owner_digest FROM remote_workflow_actions WHERE attempt_id=?",id) {
         mapper.valueToTree<JsonNode>(mapOf("context" to it.getString(1),"state" to it.getString(2),"ownerDigest" to it.getString(3)))

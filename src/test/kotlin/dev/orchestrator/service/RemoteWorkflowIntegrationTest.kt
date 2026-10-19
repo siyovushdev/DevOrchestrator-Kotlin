@@ -82,7 +82,7 @@ assert sys.argv[1]=='exec'
 assert not any(k in os.environ for k in ['DEVORCH_PERSONAL_TOKEN','DEVORCH_FETCH_TOKEN','DEVORCH_PUBLISH_TOKEN','GH_TOKEN','GITHUB_TOKEN','SSH_AUTH_SOCK'])
 prompt=sys.stdin.read()
 last=Path(sys.argv[sys.argv.index('--output-last-message')+1])
-mode='workspace-write' if any(a.startswith('permissions.devorch=') and '"."="write"' in a for a in sys.argv) else 'read-only' 
+mode='workspace-write' if any(a.startswith('permissions.devorch=') and '"."="write"' in a for a in sys.argv) else 'read-only'
 state=Path(os.environ['CODEX_HOME'])
 count=state / ('coding-count' if mode=='workspace-write' else 'review-count')
 n=int(count.read_text())+1 if count.exists() else 0
@@ -350,6 +350,15 @@ class Boundary(unittest.TestCase):
             assertTrue(c.rows("SELECT 1 FROM correction_requests") { 1 }.isEmpty())
             assertEquals("STARTING",c.rows("SELECT state FROM workflow_verifications") { it.getString(1) }.single())
         }
+    }
+
+    @Test fun changedCodingManifestBindingStopsBeforeTestsAreSubmitted() {
+        setup(); val i=issue(17); val s=service(listOf(i)); s.tick(); s.tick()
+        val manifest=root.resolve("task-1017/artifacts/remote-${actionId(i,"CODING")}/candidates/${actionId(i,"CODING")}-untested/manifest")
+        val original=Files.readString(manifest)
+        Files.writeString(manifest,original.replace(base,"a".repeat(40)))
+        assertFails { s.tick() }; assertEquals(1,submissions); assertEquals(0,posts)
+        assertTrue(RuntimeDatabase(db(i)).read { c -> c.rows("SELECT 1 FROM workflow_verifications") { 1 }.isEmpty() })
     }
 
 }
