@@ -10,6 +10,7 @@ import java.util.Properties
 internal data class PersonalConfig(
     val enabled: Boolean, val root: Path, val home: Path, val codex: Path,
     val model: String, val minimumTests: Int, val proxyPort: Int, val pollSeconds: Long,
+    val runtimeMode: String = "local",
 ) {
     companion object {
         fun read(file: Path): PersonalConfig {
@@ -26,6 +27,7 @@ internal data class PersonalConfig(
             fun directory(key: String): Path = Path.of(p.getProperty(key)).also {
                 require(it.isAbsolute && it.normalize()==it && it.toRealPath()==it && Files.isDirectory(it,NOFOLLOW_LINKS))
             }
+            val mode=p.getProperty("runtimeMode","local"); require(mode in setOf("local","ssh-vm"))
             val root=directory("root"); val home=directory("agentHome")
             require(Files.getPosixFilePermissions(root).none { it.name.startsWith("GROUP_") || it.name.startsWith("OTHERS_") })
             require(Files.getOwner(root).name==System.getProperty("user.name"))
@@ -40,7 +42,7 @@ internal data class PersonalConfig(
             val minimum=p.getProperty("minimumTests","1").toInt(); require(minimum in 1..10000)
             val port=p.getProperty("proxyPort","10809").toInt(); require(port in 1..65535)
             val poll=p.getProperty("pollSeconds","90").toLong(); require(poll in 60..120)
-            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll)
+            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode)
         }
     }
 }

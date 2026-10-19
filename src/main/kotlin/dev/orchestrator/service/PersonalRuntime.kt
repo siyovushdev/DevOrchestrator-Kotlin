@@ -23,6 +23,9 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     private val publicationPush: PublicationPush = GitHubBranchPush(token),
     private val fetch: (GitHubIssueRecord,Path,Path) -> Unit = { i,c,a -> fetchPersonalCheckout(token,i,c,a,permitted) },
 ) : TaskRuntime {
+    init {
+        if(config.runtimeMode!="local") throw ServiceStopped("REMOTE_WORKFLOW_BRIDGE_NOT_READY: SSH protocol stage only")
+    }
     private val repo=SMOKE_TARGET.repositoryId
     private fun root(i: GitHubIssueRecord)=config.root.resolve("task-${i.githubIssueId}")
     private fun database(i: GitHubIssueRecord)=root(i).resolve("run.db")

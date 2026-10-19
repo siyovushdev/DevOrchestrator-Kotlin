@@ -31,10 +31,14 @@ jobs:
       - name: Installed native Codex sandbox fixture (no inference or credentials)
         shell: bash
         run: |
-          npm install --prefix "$RUNNER_TEMP/devorch-native-codex" --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0-linux-x64
-          native_cli="$RUNNER_TEMP/devorch-native-codex/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
+          # Native deny-tmp profiles must not hide their own executable/helper.
+          # This is disposable hosted-runner storage, not a controller installation.
+          native_fixture="$HOME/devorch-native-fixture"
+          npm install --prefix "$native_fixture" --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0-linux-x64
+          native_cli="$native_fixture/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
           test -x "$native_cli"
           echo "DEVORCH_CODEX_ISOLATION_BINARY=$native_cli" >> "$GITHUB_ENV"
+          echo "DEVORCH_REMOTE_NATIVE_CANARY_BINARY=$native_cli" >> "$GITHUB_ENV"
       - name: Installed native Codex child canary (targeted first)
         shell: bash
         run: |
@@ -52,6 +56,24 @@ jobs:
                   print(failure.attrib.get('message', ''))
           PYXML
           exit "$canary_status"
+      - name: Remote protocol regressions and native permission canary (no inference)
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon test --tests dev.orchestrator.remote.RemoteWorkerTest --tests dev.orchestrator.service.PersonalConfigTest
+          regression_status=$?
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          report = Path('build/test-results/test/TEST-dev.orchestrator.remote.RemoteWorkerTest.xml')
+          if report.exists():
+              suite = ElementTree.parse(report).getroot()
+              print('REMOTE_REGRESSION_COUNTS', suite.attrib)
+              for failure in suite.findall('.//failure'):
+                  # This fixture has artificial data/auth only; no inference.
+                  print(failure.attrib.get('message', '')[:12000])
+          PY
+          exit "$regression_status"
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
       - name: PERSONAL distribution stays OFF without credentials

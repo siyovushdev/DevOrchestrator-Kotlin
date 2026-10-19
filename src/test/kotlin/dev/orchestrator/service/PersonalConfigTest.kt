@@ -31,6 +31,18 @@ model=fake-model
         serviceCommand(arrayOf("status",file.toString()))
         assertFalse(Files.exists(temp.resolve("state/service.db")))
     }
+    @Test fun sshQueueModeIsExplicitlyNotReadyBeforeCredentialsDatabaseOrExecution() {
+        val file=setup()
+        Files.writeString(file,Files.readString(file)+"runtimeMode=ssh-vm\nenabled=true\n")
+        assertEquals("ssh-vm",PersonalConfig.read(file).runtimeMode)
+        val failure=assertFailsWith<ServiceStopped> { serviceCommand(arrayOf("run",file.toString())) }
+        assertTrue(failure.message!!.contains("REMOTE_WORKFLOW_BRIDGE_NOT_READY"))
+        assertFalse(Files.exists(temp.resolve("state/service.db")))
+        assertFailsWith<ServiceStopped> { PersonalRuntime(PersonalConfig.read(file),"ARTIFICIAL_TOKEN",permitted={ true }) }
+        Files.writeString(file,Files.readString(file).replace("enabled=true","enabled=false"))
+        serviceCommand(arrayOf("service",file.toString()))
+        assertFalse(Files.exists(temp.resolve("state/service.db")))
+    }
     @Test fun wrongRepositoryAndPublicConfigCannotGrantAuthority() {
         val file=setup(); val valid=Files.readString(file)
         Files.writeString(file,valid.replace("1424152600","123")); assertFails { PersonalConfig.read(file) }
