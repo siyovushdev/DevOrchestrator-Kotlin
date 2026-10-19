@@ -8,10 +8,11 @@ import java.util.concurrent.TimeUnit
 internal object LinuxIsolation {
     private val binary = Path.of("/usr/bin/bwrap")
     fun requireModelHome(home: Path, vararg protectedPaths: Path) {
-        val controllerHome=Path.of(System.getProperty("user.home")).toAbsolutePath().normalize()
+        val controllerHome=Path.of(System.getProperty("user.home")).toRealPath()
         require(home.isAbsolute && home.normalize()==home && home.toRealPath()==home)
         require(!controllerHome.startsWith(home)) { "Controller HOME or its ancestor cannot be delegated" }
-        require(protectedPaths.none { it.startsWith(home) || home.startsWith(it) }) { "Model HOME overlaps controller data" }
+        val protected=protectedPaths.map { it.toFile().canonicalFile.toPath() }
+        require(protected.none { it.startsWith(home) || home.startsWith(it) }) { "Model HOME overlaps controller data" }
         val model=home.resolve(".codex")
         require(Files.isDirectory(model) && model.toRealPath()==model) { "Dedicated model HOME required" }
     }

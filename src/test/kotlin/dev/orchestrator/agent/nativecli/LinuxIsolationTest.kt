@@ -20,6 +20,10 @@ class LinuxIsolationTest {
             assertFails { LinuxIsolation.requireModelHome(temp) }
             assertFails { LinuxIsolation.requireModelHome(model,model.resolve("service.db")) }
             assertFails { LinuxIsolation.requireModelHome(model,controller) }
+            val relative=Path.of("").toAbsolutePath().relativize(model.resolve("relative.db"))
+            assertFails { LinuxIsolation.requireModelHome(model,relative) }
+            val alias=Files.createSymbolicLink(temp.resolve("model-alias"),model)
+            assertFails { LinuxIsolation.requireModelHome(model,alias.resolve("state.db")) }
             LinuxIsolation.requireModelHome(model,controller.resolve("state.db"))
         } finally { System.setProperty("user.home",old) }
     }
