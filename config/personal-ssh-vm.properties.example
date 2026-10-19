@@ -1,0 +1,17 @@
+# SOURCE EXAMPLE ONLY. Do not deploy/enable without separate Owner GO.
+# Existing canonical private directories/files; Owner-managed config must be mode 600.
+enabled=false
+runtimeMode=ssh-vm
+repository=siyovushdev/devorch-kotlin-e2e-smoke
+repositoryId=1424152600
+owner=siyovushdev
+root=/home/devorch-e2e/devorch-controller/state
+# Empty compatibility directory; no Codex login/credentials required on controller.
+agentHome=/home/devorch-e2e/devorch-controller/unused-agent-home
+codex=/unused/codex
+model=OWNER_MUST_SELECT
+minimumTests=1
+proxyPort=10809
+pollSeconds=90
+sshIdentityFile=/home/devorch-e2e/.ssh/devorch_vm_worker
+sshKnownHosts=/home/devorch-e2e/.ssh/devorch_vm_known_hosts

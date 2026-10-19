@@ -56,11 +56,11 @@ jobs:
                   print(failure.attrib.get('message', ''))
           PYXML
           exit "$canary_status"
-      - name: Remote protocol regressions and native permission canary (no inference)
+      - name: Remote workflow and protocol regressions (no inference)
         shell: bash
         run: |
           set +e
-          gradle --no-daemon test --tests dev.orchestrator.remote.RemoteWorkerTest --tests dev.orchestrator.service.PersonalConfigTest
+          gradle --no-daemon test --tests dev.orchestrator.remote.RemoteWorkerTest --tests dev.orchestrator.service.PersonalConfigTest --tests dev.orchestrator.service.RemoteWorkflowIntegrationTest
           regression_status=$?
           python3 - <<'PY'
           from pathlib import Path

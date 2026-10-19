@@ -31,17 +31,19 @@ model=fake-model
         serviceCommand(arrayOf("status",file.toString()))
         assertFalse(Files.exists(temp.resolve("state/service.db")))
     }
-    @Test fun sshQueueModeIsExplicitlyNotReadyBeforeCredentialsDatabaseOrExecution() {
+    @Test fun sshModeRequiresExplicitPrivatePinnedFilesAndDefaultsOff() {
         val file=setup()
-        Files.writeString(file,Files.readString(file)+"runtimeMode=ssh-vm\nenabled=true\n")
-        assertEquals("ssh-vm",PersonalConfig.read(file).runtimeMode)
-        val failure=assertFailsWith<ServiceStopped> { serviceCommand(arrayOf("run",file.toString())) }
-        assertTrue(failure.message!!.contains("REMOTE_WORKFLOW_BRIDGE_NOT_READY"))
-        assertFalse(Files.exists(temp.resolve("state/service.db")))
-        assertFailsWith<ServiceStopped> { PersonalRuntime(PersonalConfig.read(file),"ARTIFICIAL_TOKEN",permitted={ true }) }
-        Files.writeString(file,Files.readString(file).replace("enabled=true","enabled=false"))
+        Files.writeString(file,Files.readString(file)+"runtimeMode=ssh-vm\n")
+        assertFails { PersonalConfig.read(file) }
+        val key=Files.writeString(temp.resolve("identity"),"ARTIFICIAL_KEY")
+        val hosts=Files.writeString(temp.resolve("known-hosts"),"[127.0.0.1]:2222 fixture-host-key")
+        for(p in listOf(key,hosts)) Files.setPosixFilePermissions(p,PosixFilePermissions.fromString("rw-------"))
+        Files.writeString(file,Files.readString(file)+"sshIdentityFile=$key\nsshKnownHosts=$hosts\n")
+        val config=PersonalConfig.read(file); assertFalse(config.enabled); assertEquals("ssh-vm",config.runtimeMode)
         serviceCommand(arrayOf("service",file.toString()))
         assertFalse(Files.exists(temp.resolve("state/service.db")))
+        Files.setPosixFilePermissions(hosts,PosixFilePermissions.fromString("rw-r--r--"))
+        assertFails { PersonalConfig.read(file) }
     }
     @Test fun wrongRepositoryAndPublicConfigCannotGrantAuthority() {
         val file=setup(); val valid=Files.readString(file)
