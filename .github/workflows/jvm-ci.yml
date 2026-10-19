@@ -35,6 +35,23 @@ jobs:
           native_cli="$RUNNER_TEMP/devorch-native-codex/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
           test -x "$native_cli"
           echo "DEVORCH_CODEX_ISOLATION_BINARY=$native_cli" >> "$GITHUB_ENV"
+      - name: Installed native Codex child canary (targeted first)
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon test --tests dev.orchestrator.agent.nativecli.InstalledCodexIsolationTest
+          canary_status=$?
+          python3 - <<'PYXML'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          report = Path('build/test-results/test/TEST-dev.orchestrator.agent.nativecli.InstalledCodexIsolationTest.xml')
+          if report.exists():
+              suite = ElementTree.parse(report).getroot()
+              print('INSTALLED_CODEX_CANARY_COUNTS', suite.attrib)
+              for failure in suite.findall('.//failure'):
+                  print(failure.attrib.get('message', ''))
+          PYXML
+          exit "$canary_status"
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
       - name: PERSONAL distribution stays OFF without credentials
