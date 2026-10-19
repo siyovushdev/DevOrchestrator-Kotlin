@@ -111,7 +111,7 @@ After separate Owner/admin approval of placement and a **no-model protocol canar
    host sockets or host SSH-agent into the guest.
 2. Manually create private `~/.config/devorch-worker.json` using the schema in
    `config/ssh-worker.json.example`; canonical root/modelHome must exist, be
-   disjoint, root/modelHome private 0700, config 0600. Keep both outside minimal OS mounts (`/usr`, `/etc`, etc.). Use a native absolute Codex executable;
+   disjoint, root/modelHome private 0700, config 0600. Keep both outside minimal OS mounts (`/usr`, `/etc`, etc.). Use a native absolute Codex executable outside temporary directories (deny-tmp can hide an executable placed there);
    authenticate only that guest's dedicated model HOME. No controller GitHub PAT.
    Review managed requirements and keep unrelated plugins/MCP/credentials absent.
 3. Restrict the dedicated SSH public key to the fixed worker command with OpenSSH
