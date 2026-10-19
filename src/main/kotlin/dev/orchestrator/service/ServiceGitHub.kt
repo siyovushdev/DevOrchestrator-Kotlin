@@ -13,9 +13,12 @@ import java.time.Duration
 internal class GitHubUnavailable(val code: String) : RuntimeException(code)
 internal class GitHubRejected(val status: Int) : RuntimeException("GITHUB_HTTP_$status")
 
+internal data class StatusEvidence(val id: Long, val url: String, val body: String)
+
 internal interface ServiceGitHub {
     fun issues(): List<GitHubIssueRecord>
     fun authorized(issue: GitHubIssueRecord): Boolean
+    fun findStatus(issue: GitHubIssueRecord, body: String): StatusEvidence? = null
     fun postStatus(number: Int, body: String)
 }
 
@@ -78,6 +81,35 @@ internal class PersonalGitHub(private val token: String, private val transport: 
         }
         return false
     }
+    /** Complete bounded GET scan followed by exact GET read-back; never POST or change labels. */
+    override fun findStatus(issue: GitHubIssueRecord, body: String): StatusEvidence? {
+        val actual = mapper.readTree(get("$root/issues/${issue.issueNumber}"))
+        check(actual.path("id").asLong()==issue.githubIssueId && !actual.has("pull_request"))
+        val matches = mutableListOf<Long>()
+        val seen = mutableSetOf<Long>()
+        for (page in 1..10) {
+            val comments = mapper.readTree(get("$root/issues/${issue.issueNumber}/comments?per_page=100&page=$page"))
+            check(comments.isArray && comments.size()<=100)
+            for (comment in comments) {
+                val id=comment.path("id").asLong()
+                check(id>0 && seen.add(id))
+                if (comment.path("body").asText()==body) matches += id
+            }
+            if (comments.size()<100) {
+                if (matches.size!=1) return null
+                val id=matches.single()
+                val saved=mapper.readTree(get("$root/issues/comments/$id"))
+                val url="https://github.com/${SMOKE_TARGET.fullName}/issues/${issue.issueNumber}#issuecomment-$id"
+                if (saved.path("id").asLong()!=id || saved.path("body").asText()!=body ||
+                    saved.path("user").path("login").asText()!="siyovushdev" ||
+                    saved.path("issue_url").asText()!="https://api.github.com$root/issues/${issue.issueNumber}" ||
+                    saved.path("html_url").asText()!=url) return null
+                return StatusEvidence(id,url,body)
+            }
+        }
+        return null // Incomplete history is not evidence of absence or uniqueness.
+    }
+
     override fun postStatus(number: Int,body: String) {
         require(number>0 && body.length<=2000)
         val r=request("POST","$root/issues/$number/comments",mapper.writeValueAsString(mapOf("body" to body)))

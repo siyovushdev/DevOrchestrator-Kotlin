@@ -84,3 +84,39 @@ POST. При неработающей SQLite процесс всё равно з
 Owner/Chief разбирают причину и подтверждённые durable effects перед отдельным
 исправлением. Не редактировать SQLite вручную ради повторного запуска.
 
+## Согласование неопределённого комментария
+
+Новый status intent сохраняет точное тело и случайный UUID marker **до POST**.
+Потеря ответа удерживает задачу и очередь. Автоматического POST этого stage больше
+нет, в том числе после crash между POST и записью подтверждения. Старые Coding,
+Review и Publisher journals и их UNKNOWN не сбрасываются.
+
+В существующем доверенном окружении выделенного пользователя (токен только через
+прежний приватный env-канал), пока служба остановлена:
+
+```
+app/bin/dev-orchestrator-kotlin status /absolute/personal.properties
+app/bin/dev-orchestrator-kotlin check-status /absolute/personal.properties 17 tests
+app/bin/dev-orchestrator-kotlin resume-status /absolute/personal.properties 17 tests 123456789
+```
+
+Числа и stage взять из **своего** `status` и результата проверки, это пример.
+`check-status` открывает SQLite read-only без миграций и делает только GitHub GET:
+точная Issue identity, полная история до 1000 comments, единственное полное тело,
+затем GET конкретного comment с проверкой id/body/owner/Issue URL/comment URL.
+`CONFIRMED_REMOTE` само по себе ничего не продолжает. Нулевой/неоднозначный ответ,
+неполная история, изменённое сообщение или отсутствие сохранённого тела/marker
+оставляют `NEEDS_OWNER`. Сетевой сбой проверки также ничего не разрешает.
+
+`resume-status` требует тот же OS lock, выполняет обычный recovery журналов без
+запуска моделей/PUSH/POST, **ещё раз делает GET** и сверяет указанный comment ID.
+В одной SQLite transaction подтверждает только этот status intent, записывает
+`personal_reconciliations` (время, Owner-команда, полное evidence) и возвращает
+сохранённое accepted/active/done состояние только при отсутствии других pending
+comments. Команда не запускает очередь: службу Owner включает отдельно.
+Следующий обычный шаг снова проверяет текущие Owner-разрешения и runtime journals.
+
+У старых неопределённых комментариев без сохранённого UUID-тела достоверного
+автоматического matching нет. Они остаются `NEEDS_OWNER`; миграция не выдумывает
+доказательства. Нет команд force/retry/reset для неизвестных model/PUSH/PR effects,
+ошибок подготовки, внутренних ошибок или иных holds.

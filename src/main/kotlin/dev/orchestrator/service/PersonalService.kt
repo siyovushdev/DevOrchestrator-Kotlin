@@ -29,6 +29,13 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             issue_id INTEGER NOT NULL REFERENCES personal_tasks(issue_id), stage TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN ('sending','confirmed','uncertain')),
             PRIMARY KEY(issue_id,stage))""")
+        val statusColumns=c.rows("PRAGMA table_info(personal_status)") { it.getString("name") }.toSet()
+        if ("body" !in statusColumns) c.mutate("ALTER TABLE personal_status ADD COLUMN body TEXT")
+        val taskColumns=c.rows("PRAGMA table_info(personal_tasks)") { it.getString("name") }.toSet()
+        if ("resume_state" !in taskColumns) c.mutate("ALTER TABLE personal_tasks ADD COLUMN resume_state TEXT")
+        c.mutate("""CREATE TABLE IF NOT EXISTS personal_reconciliations(
+            id INTEGER PRIMARY KEY, issue_id INTEGER NOT NULL, stage TEXT NOT NULL,
+            recorded_at TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL)""")
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_failures(
             id INTEGER PRIMARY KEY, recorded_at TEXT NOT NULL, diagnostic TEXT NOT NULL)""")
     } }
@@ -50,7 +57,10 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             it.getString(2),it.getString(3),it.getString(4),it.getString(5))
     } }
     private fun hold(i: GitHubIssueRecord,reason: String) = db.write { c ->
-        c.mutate("UPDATE personal_tasks SET state='held',stage='held',reason=? WHERE issue_id=?",reason,i.githubIssueId)
+        if (reason=="STATUS_OUTCOME_UNKNOWN") {
+            c.mutate("""UPDATE personal_tasks SET resume_state=CASE WHEN state!='held' THEN state ELSE resume_state END,
+                state='held',reason=? WHERE issue_id=? AND (state!='held' OR reason='STATUS_OUTCOME_UNKNOWN')""",reason,i.githubIssueId)
+        } else c.mutate("UPDATE personal_tasks SET state='held',stage='held',reason=?,resume_state=NULL WHERE issue_id=?",reason,i.githubIssueId)
     }
     fun recover() {
         requireHealthy()
@@ -70,7 +80,7 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         // An unresolved task blocks the entire one-worker queue, including different task databases.
         val previous=tasks()
         for (t in previous.filter { it.state in setOf("done","held") }) {
-            if (!status(t.issue,t.stage,t.url)) return "NEEDS_OWNER"
+            if (t.reason=="STATUS_OUTCOME_UNKNOWN" || !status(t.issue,t.stage,t.url)) return "NEEDS_OWNER"
         }
         if(previous.any { it.state=="held" }) return "NEEDS_OWNER"
         var task=previous.firstOrNull { it.state!="done" }
@@ -106,7 +116,7 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
                     if(progress.stage in setOf("done","held")) progress.stage else "active",progress.stage,progress.url,i.githubIssueId) }
             }
             val now=tasks().single { it.issue.githubIssueId==i.githubIssueId }
-            status(i,now.stage,now.url)
+            if (!status(i,now.stage,now.url)) return "NEEDS_OWNER"
             return now.state.uppercase()
         } catch(failure: Exception) {
             hold(i,"INTERNAL_ACTION_ERROR")
@@ -134,9 +144,10 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             }
         }
         // Intent BEFORE POST. Lost response or crash never permits another POST for this stage.
-        db.write { it.mutate("INSERT INTO personal_status(issue_id,stage,state) VALUES (?,?,'sending')",i.githubIssueId,stage) }
+        val body="DevOrchestrator: $text\n\n<!-- devorch-status:${java.util.UUID.randomUUID()} -->"
+        db.write { it.mutate("INSERT INTO personal_status(issue_id,stage,state,body) VALUES (?,?,'sending',?)",i.githubIssueId,stage,body) }
         try {
-            github.postStatus(i.issueNumber,"DevOrchestrator: $text")
+            github.postStatus(i.issueNumber,body)
         } catch(failure: Exception) {
             db.write { it.mutate("UPDATE personal_status SET state='uncertain' WHERE issue_id=? AND stage=?",i.githubIssueId,stage) }
             hold(i,"STATUS_OUTCOME_UNKNOWN")
@@ -146,5 +157,39 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         db.write { check(it.mutate("UPDATE personal_status SET state='confirmed' WHERE issue_id=? AND stage=? AND state='sending'",i.githubIssueId,stage)==1) }
         return true
     }
+    private fun unresolved(number: Int, stage: String): Pair<Task,String> {
+        requireHealthy()
+        val task=tasks().single { it.issue.issueNumber==number }
+        check(task.state=="held" && task.reason=="STATUS_OUTCOME_UNKNOWN") { "Only uncertain status comments can be reconciled" }
+        val body=db.read { c -> c.rows("SELECT body FROM personal_status WHERE issue_id=? AND stage=? AND state='uncertain'",
+            task.issue.githubIssueId,stage) { it.getString(1) }.singleOrNull() }
+        check(!body.isNullOrBlank()) { "No exact saved comment intent; NEEDS_OWNER (legacy or unknown)" }
+        return task to body
+    }
+
+    /** Read-only local/remote inspection. A failed/ambiguous search never clears the hold. */
+    fun checkStatus(number: Int, stage: String): StatusEvidence? {
+        val (task,body)=unresolved(number,stage)
+        return github.findStatus(task.issue,body)
+    }
+
+    /** Explicit local Owner command, scoped to one exact comment, never a generic UNKNOWN reset. */
+    fun resumeStatus(number: Int, stage: String, commentId: Long): Boolean {
+        val (task,body)=unresolved(number,stage)
+        val evidence=github.findStatus(task.issue,body) ?: return false
+        if (commentId!=evidence.id) return false
+        db.write { c ->
+            check(c.mutate("UPDATE personal_status SET state='confirmed' WHERE issue_id=? AND stage=? AND state='uncertain' AND body=?",
+                task.issue.githubIssueId,stage,body)==1)
+            c.mutate("INSERT INTO personal_reconciliations(issue_id,stage,recorded_at,actor,evidence) VALUES (?,?,?,?,?)",
+                task.issue.githubIssueId,stage,Instant.now().toString(),"owner:local-command",mapper.writeValueAsString(evidence))
+            val pending=c.rows("SELECT 1 FROM personal_status WHERE issue_id=? AND state!='confirmed'",task.issue.githubIssueId) { 1 }.isNotEmpty()
+            if (!pending) check(c.mutate("""UPDATE personal_tasks SET state=resume_state,reason=NULL,resume_state=NULL
+                WHERE issue_id=? AND state='held' AND reason='STATUS_OUTCOME_UNKNOWN' AND resume_state IN ('accepted','active','done')""",
+                task.issue.githubIssueId)==1)
+        }
+        return true
+    }
+
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
 }

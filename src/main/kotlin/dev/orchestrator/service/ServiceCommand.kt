@@ -12,9 +12,10 @@ internal fun serviceCommand(args: Array<String>) {
 }
 
 private fun executeServiceCommand(args: Array<String>) {
-
-    require(args.size==2 && args[0] in setOf("service","run","status")) {
-        "Usage: dev-orchestrator-kotlin service|run|status /absolute/personal.properties"
+    val command=args.firstOrNull()
+    require((command in setOf("service","run","status") && args.size==2) ||
+        (command=="check-status" && args.size==4) || (command=="resume-status" && args.size==5)) {
+        "Usage: service|run|status CONFIG; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID"
     }
     val file=Path.of(args[1]); require(file.isAbsolute)
     val config=PersonalConfig.read(file)
@@ -22,14 +23,25 @@ private fun executeServiceCommand(args: Array<String>) {
         println(readLocalServiceStatus(config.root.resolve("service.db")))
         return
     }
+    if (command=="check-status") {
+        val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
+        val result=checkSavedStatus(config.root.resolve("service.db"),PersonalGitHub(token),args[2].toInt(),args[3])
+        println(result?.let { "CONFIRMED_REMOTE: ${it.id} ${it.url}; use resume-status explicitly" } ?: "NEEDS_OWNER: exact unique comment not confirmed")
+        return
+    }
     ServiceLock(config.root).use {
-        if(!config.enabled) { println("PERSONAL autonomy OFF"); return }
+        if(!config.enabled && command!="resume-status") { println("PERSONAL autonomy OFF"); return }
         check(System.getProperty("user.name")=="devorch-e2e") { "Dedicated PERSONAL account required" }
         val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
         val github=PersonalGitHub(token)
         val permitted={ PersonalConfig.read(file)==config && config.enabled }
         val runtime=PersonalRuntime(config,token,{ issue -> permitted() && github.authorized(issue) })
         val service=PersonalService(config.root.resolve("service.db"),github,runtime,permitted)
+        if (command=="resume-status") {
+            guardedServiceCall(service) { service.recover(); "RECOVERED" }
+            println(if (service.resumeStatus(args[2].toInt(),args[3],args[4].toLong())) "STATUS_RECONCILED: start service separately" else "NEEDS_OWNER: not confirmed")
+            return
+        }
         dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
         guardedServiceCall(service) { service.recover(); "RECOVERED" }
         do {
@@ -75,6 +87,32 @@ internal fun guardedServiceCall(service: PersonalService, action: () -> String):
     val rejection=generateSequence<Throwable>(failure) { it.cause }.take(8).filterIsInstance<GitHubRejected>().firstOrNull()
     throw ServiceStopped(if (rejection!=null) "GITHUB_ACCESS_STOPPED_HTTP_${rejection.status}: $diagnostic" else "INTERNAL_ERROR_STOPPED: $diagnostic")
 }
+
+internal fun checkSavedStatus(database: Path, github: ServiceGitHub, number: Int, stage: String): StatusEvidence? =
+    java.sql.DriverManager.getConnection("jdbc:sqlite:file:$database?mode=ro").use { c ->
+        val hasIntent=c.createStatement().use { st -> st.executeQuery("PRAGMA table_info(personal_status)").use { rows ->
+            var found=false
+            while(rows.next()) if (rows.getString("name")=="body") found=true
+            found
+        } }
+        if (!hasIntent) return@use null // Old intents cannot be reconstructed reliably.
+        c.prepareStatement("""SELECT t.source,s.body FROM personal_tasks t JOIN personal_status s ON t.issue_id=s.issue_id
+            WHERE t.number=? AND s.stage=? AND
+            ((t.state='held' AND t.reason='STATUS_OUTCOME_UNKNOWN' AND s.state='uncertain') OR
+             (s.state='sending' AND t.state IN ('accepted','active','done')))
+            AND NOT EXISTS(SELECT 1 FROM personal_failures)""").use { query ->
+            query.setInt(1,number); query.setString(2,stage)
+            query.executeQuery().use { rows ->
+                if (!rows.next()) return@use null
+                val body=rows.getString(2) ?: return@use null
+                val n=com.fasterxml.jackson.databind.ObjectMapper().readTree(rows.getString(1))
+                val issue=dev.orchestrator.storage.GitHubIssueRecord(n["repositoryId"].asLong(),n["issueNumber"].asInt(),
+                    n["githubIssueId"].asLong(),java.time.Instant.parse(n["sourceUpdatedAt"].asText()),
+                    n["title"].asText(),n["body"].asText(),n["baseSha"].asText(),true)
+                github.findStatus(issue,body)
+            }
+        }
+    }
 
 internal fun safeServiceDiagnostic(failure: Throwable): String =
     generateSequence(failure) { it.cause }.take(8).joinToString(" <- ") { e ->

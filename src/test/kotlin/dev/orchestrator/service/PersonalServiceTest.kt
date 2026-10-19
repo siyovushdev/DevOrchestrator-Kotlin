@@ -25,6 +25,8 @@ class PersonalServiceTest {
     private val github=object: ServiceGitHub {
         override fun issues()=records
         override fun authorized(issue: GitHubIssueRecord)=authorized
+        override fun findStatus(issue: GitHubIssueRecord,body: String): StatusEvidence? =
+            if (posts.count { it=="${issue.issueNumber}:$body" }==1) StatusEvidence(99,"https://github.com/example#issuecomment-99",body) else null
         override fun postStatus(number: Int,body: String) { posts.add("$number:$body"); if(loseStatus) throw GitHubUnavailable("FAKE_LOST_RESPONSE") }
     }
     private val runtime=object: TaskRuntime {
@@ -34,6 +36,57 @@ class PersonalServiceTest {
     }
     private class SimulatedCrash: Error()
     private fun service()=PersonalService(database,github,runtime,{enabled})
+    @Test fun confirmedLostPostIsReadOnlyCheckedAndExplicitlyResumedWithoutDuplicate() {
+        loseStatus=true
+        val s=service(); assertEquals("NEEDS_OWNER",s.tick())
+        loseStatus=false
+        val restarted=service(); restarted.recover()
+        val before=java.nio.file.Files.readAllBytes(database)
+        assertEquals(99,checkSavedStatus(database,github,17,"accepted")?.id)
+        assertContentEquals(before,java.nio.file.Files.readAllBytes(database))
+        assertFalse(restarted.resumeStatus(17,"accepted",100))
+        assertEquals(0,prepares); assertEquals(1,posts.size)
+        assertTrue(restarted.resumeStatus(17,"accepted",99))
+        assertFails { restarted.resumeStatus(17,"accepted",99) }
+        assertEquals(1,posts.size)
+        assertEquals("ACTIVE",service().tick()); assertEquals(1,prepares)
+        val evidence=RuntimeDatabase(database).read { it.rows("SELECT evidence FROM personal_reconciliations") { it.getString(1) } }
+        assertEquals(1,evidence.size); assertTrue(evidence.single().contains("issuecomment-99"))
+    }
+    private fun reconcileAfterCompletedAction(stage: String) {
+        val s=service(); assertEquals("ACTIVE",s.tick())
+        progress=if(stage=="done") TaskProgress("done","https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/7") else TaskProgress(stage)
+        loseStatus=true; assertEquals("NEEDS_OWNER",s.tick()); loseStatus=false
+        val beforePosts=posts.size
+        val restarted=service(); restarted.recover()
+        assertEquals(99,checkSavedStatus(database,github,17,stage)?.id)
+        assertTrue(restarted.resumeStatus(17,stage,99))
+        val final=service(); final.recover()
+        if(stage=="done") repeat(3) { assertEquals("IDLE",final.tick()) }
+        else { progress=TaskProgress("done","https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/7"); final.tick() }
+        assertEquals(1,prepares)
+        assertEquals(if(stage=="done") 1 else 2,steps)
+        assertEquals(if(stage=="done") beforePosts else beforePosts+1,posts.size)
+    }
+    @Test fun reconcileLostTestsStatusDoesNotRepeatPriorRuntimeAction() = reconcileAfterCompletedAction("tests")
+    @Test fun reconcileLostDoneStatusDoesNotRepeatPublisher() = reconcileAfterCompletedAction("done")
+    @Test fun sendingCrashCanBeInspectedReadOnlyBeforeRecovery() {
+        val s=service(); loseStatus=true; s.tick(); loseStatus=false
+        RuntimeDatabase(database).write {
+            it.mutate("UPDATE personal_status SET state='sending'")
+            it.mutate("UPDATE personal_tasks SET state='accepted',reason=NULL,resume_state=NULL")
+        }
+        assertEquals(99,checkSavedStatus(database,github,17,"accepted")?.id)
+        s.recover(); assertTrue(s.resumeStatus(17,"accepted",99)); assertEquals(0,prepares)
+    }
+    @Test fun absentOrAmbiguousResultAndLegacyIntentStayHeld() {
+        loseStatus=true; val s=service(); s.tick(); loseStatus=false
+        posts.clear()
+        assertNull(s.checkStatus(17,"accepted")); assertFalse(s.resumeStatus(17,"accepted",99))
+        assertEquals("NEEDS_OWNER",s.tick()); assertEquals(0,prepares); assertEquals(0,steps)
+        RuntimeDatabase(database).write { it.mutate("UPDATE personal_status SET body=NULL") }
+        assertFails { s.resumeStatus(17,"accepted",99) }
+    }
     @Test fun sqliteFailureIsRecordedAndStopsRestartWithoutMoreEffectsOrSecretText() {
         val s=service()
         RuntimeDatabase(database).write { it.mutate("""CREATE TRIGGER fail_state BEFORE UPDATE ON personal_tasks
@@ -92,7 +145,7 @@ class PersonalServiceTest {
         loseStatus=false
         val restarted=service(); restarted.recover(); repeat(3) { assertEquals("NEEDS_OWNER",restarted.tick()) }
         assertEquals(0,steps); assertEquals(0,prepares)
-        assertEquals(2,posts.size) // Before P3: uncertain comment plus held explanation.
+        assertEquals(1,posts.size) // No further POST while outcome is uncertain.
         assertTrue(readLocalServiceStatus(database).contains("STATUS_OUTCOME_UNKNOWN"))
     }
     @Test fun crashAfterPreparationIntentNeverReprepares() {
