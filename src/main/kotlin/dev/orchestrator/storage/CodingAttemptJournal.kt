@@ -212,7 +212,8 @@ internal class CodingAttemptJournal(database: Path) {
 
     private fun supportedCoding(assigned: AssignedAgentProfile): Boolean =
         assigned.profile.adapterId == "codex-cli" && assigned.profile.provider == "openai" ||
-            assigned.profile.adapterId == "cursor-cloud" && assigned.profile.provider == "cursor"
+            assigned.profile.adapterId == "cursor-cloud" && assigned.profile.provider == "cursor" ||
+            assigned.profile.adapterId == "cursor-cli" && assigned.profile.provider == "cursor"
 
     private fun conflictingAttempt(conn: Connection, repo: Long, workspace: Path, own: String? = null,
                                    completedWorkflow: String? = null): Boolean {

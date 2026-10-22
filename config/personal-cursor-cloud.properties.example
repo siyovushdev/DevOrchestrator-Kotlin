@@ -1,7 +1,8 @@
-# Product executor. Copy outside every checkout and agentHome. chmod 600 before use.
+# Opt-in Cloud Agents API profile. The default product path is personal-cursor-cli.properties.example.
 # enabled stays false until a separate Owner GO. This file never contains a token.
 enabled=false
 runtimeMode=cursor-cloud
+profile=cloud-api
 repository=siyovushdev/devorch-kotlin-e2e-smoke
 repositoryId=1424152600
 owner=siyovushdev

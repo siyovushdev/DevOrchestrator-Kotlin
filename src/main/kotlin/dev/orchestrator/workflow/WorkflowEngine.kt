@@ -49,6 +49,7 @@ internal class WorkflowEngine(
     internal val fixtureCli: Boolean = false,
     private val expectedCodexSha256: String? = null,
     private val cursor: dev.orchestrator.cursor.CursorCloudSettings? = null,
+    private val cli: dev.orchestrator.profile.CursorCliSettings? = null,
 ) {
     internal val store = SqliteTaskStore(database)
     internal val db = RuntimeDatabase(database)
@@ -59,11 +60,12 @@ internal class WorkflowEngine(
 
     private val remoteBridge by lazy { remote?.let { RemoteWorkflowBridge(this,it) } }
     private val cursorBridge by lazy { cursor?.let { dev.orchestrator.cursor.CursorCloudWorkflowBridge(this,it) } }
+    private val cliBridge by lazy { cli?.let { dev.orchestrator.profile.CursorCliWorkflowBridge(this,it) } }
 
     init {
         require(repositoryId>0 && minimumTests in 1..10000 && correctionLimit in 0..2)
         require(timeout.toMillis() in 50L..StageBudget.MAX_MILLIS && proxyPort in 1..65535)
-        require(remote==null || cursor==null)
+        require(listOf(remote!=null, cursor!=null, cli!=null).count { it } <= 1)
     }
 
     /** One persisted action per call. Repeated terminal/pending calls do not launch twice. */
@@ -73,8 +75,8 @@ internal class WorkflowEngine(
         if (w.hold!=WorkflowHold.NONE || !ownerGo()) return "NEEDS_OWNER"
         if (stopRequested()) return cancelIfQuiet(issueNumber)
         return when (w.phase) {
-            WorkflowPhase.VERIFYING -> cursorBridge?.execute(issueNumber,"TESTS") ?: verifyCompletedCoding(issueNumber)
-            WorkflowPhase.REVIEWING -> cursorBridge?.execute(issueNumber,"REVIEW") ?: launchReview(issueNumber)
+            WorkflowPhase.VERIFYING -> cursorBridge?.execute(issueNumber,"TESTS") ?: cliBridge?.execute(issueNumber,"TESTS") ?: verifyCompletedCoding(issueNumber)
+            WorkflowPhase.REVIEWING -> cursorBridge?.execute(issueNumber,"REVIEW") ?: cliBridge?.execute(issueNumber,"REVIEW") ?: launchReview(issueNumber)
             WorkflowPhase.QUEUED -> {
                 val capped = db.read { c -> c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",
                     w.id,w.correctionsUsed) { it.getInt(1) }.singleOrNull() }?.let { minOf(it, ownerCorrectionCeiling().coerceIn(0,2)) }
@@ -91,6 +93,7 @@ internal class WorkflowEngine(
             WorkflowPhase.CODING -> {
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
                 cursorBridge?.let { return it.execute(issueNumber,"CODING") }
+                cliBridge?.let { return it.execute(issueNumber,"CODING") }
                 remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
                     proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested,fixtureCli=fixtureCli,
@@ -324,6 +327,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     fun recover(issueNumber: Int = 1): Int {
         store.findWorkflow(repositoryId,issueNumber)?.let { requireExecutionSite(it.id) }
         cursorBridge?.let { return it.recover(issueNumber) }
+        cliBridge?.let { return it.recover(issueNumber) }
         remoteBridge?.let { return it.recover(issueNumber) }
         val workflow = store.findWorkflow(repositoryId,issueNumber) ?: return 0
         if (store.findPolicy(repositoryId)?.kind!=ProjectKind.PERSONAL) return 0

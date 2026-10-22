@@ -4,9 +4,26 @@
 `siyovushdev/devorch-kotlin-e2e-smoke`. Текст Issue не даёт прав и не меняет лимиты.
 Merge всегда вручную. Команды ниже не открывают HTTP-порт и не ставят службу сами.
 
-## Исполнитель: Cursor Cloud Agents API
+## Профиль по умолчанию: Cursor CLI
 
-Рабочий режим — `runtimeMode=cursor-cloud`. Пример: `config/personal-cursor-cloud.properties.example`.
+Рабочий путь — `runtimeMode=cursor-cli` и `profile=default`. Пример: `config/personal-cursor-cli.properties.example`.
+Роли coder и reviewer запускают уже залогиненный `agent` на контроллере: `-p --trust --force --sandbox disabled`.
+Отдельной песочницы, bubblewrap и SSH на этом пути нет. Ключ `CURSOR_API_KEY` не нужен: auth профиля — `subscription`.
+Если бинарник `cursorCli` не исполняемый, стадия останавливается. Перехода на cloud или Codex нет.
+Одна стадия — один адаптер. Coding и Review — две разные сессии. Тесты между ними запускает контроллер.
+Строка стадии пишется до запуска. UNKNOWN эту сессию не повторяет. Draft PR по-прежнему один.
+
+Профиль `cloud-api` (`runtimeMode=cursor-cloud`) сохраняет `POST https://api.cursor.com/v1/agents` и выбирается только явно.
+У версии профиля есть runtime (`cli` или `cloud`), auth (`subscription` или `api`), модель, effort,
+`maxCorrections` (по умолчанию 2, не больше 2) и таймаут стадии (по умолчанию 20 минут, потолок 60).
+У `default` это `cli`, `subscription`, модель `account-default` и effort `DEFAULT`.
+`account-default` не передаёт `--model`. У CLI нет флага effort: значение остаётся в каталоге и в журнале стадии.
+Пара `cli`+`api` и пара `cloud`+`subscription` не сохраняются.
+Новая версия не переписывает старую. Уже закреплённая за задачу версия не меняется.
+
+## Исполнитель cloud-api: Cursor Cloud Agents API
+
+Пример: `config/personal-cursor-cloud.properties.example`.
 Код не вызывает Codex CLI, не читает ключ OpenAI и не открывает локальный SSH.
 
 Ключ только в окружении процесса: `CURSOR_API_KEY`. Это пользовательский или сервисный ключ

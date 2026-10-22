@@ -36,6 +36,7 @@ private fun executeServiceCommand(args: Array<String>) {
         stopInFlight(config)
         val stopped=when(config.runtimeMode) {
             "cursor-cloud" -> "активный Cursor run"
+            "cursor-cli" -> "процесс Cursor CLI"
             "ssh-vm" -> "отдельный SSH-гость"
             else -> "локальный процесс"
         }
@@ -87,6 +88,7 @@ private fun executeServiceCommand(args: Array<String>) {
             return
         }
         if(config.runtimeMode=="local") dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
+        if(config.runtimeMode=="cursor-cli") check(config.profileId=="default")
         if(config.runtimeMode=="cursor-cloud") {
             if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) throw ServiceStopped("CURSOR_AUTH_MISSING")
             try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable() }
@@ -157,17 +159,20 @@ private fun idleRuntime(): TaskRuntime = object: TaskRuntime {
 
 internal fun diagnose(config: PersonalConfig): String {
     val db=config.root.resolve("service.db")
-    val isolation=try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable(); "available" }
+    val isolation=if (config.runtimeMode=="cursor-cli") "not-required" else try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable(); "available" }
         catch (_: Exception) { "unavailable" }
-    val codex=if (config.runtimeMode=="cursor-cloud") "not-used" else if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
-    val cursorKey=if (config.runtimeMode!="cursor-cloud") "not-used" else if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) "unset" else "set"
+    val codex=if (config.runtimeMode=="cursor-cloud" || config.runtimeMode=="cursor-cli") "not-used" else if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
+    val cursorKey=if (config.runtimeMode!="cursor-cloud") "not-required" else if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) "unset" else "set"
+    val cli=if (config.cursorCli==null) "not-used" else if (java.nio.file.Files.isExecutable(config.cursorCli)) "executable" else "missing"
     val tasks=if (java.nio.file.Files.isRegularFile(db)) readLocalServiceStatus(db) else "No service.db"
     return """enabled=${config.enabled}
 runtime=${config.runtimeMode}
-executor=${if (config.runtimeMode=="cursor-cloud") "cursor-cloud-agents-api" else config.runtimeMode}
+profile=${config.profileId}
+executor=${when(config.profileId) { "default" -> "cursor-cli"; "cloud-api" -> "cursor-cloud-agents-api"; else -> config.runtimeMode }}
 repository=siyovushdev/devorch-kotlin-e2e-smoke id=1424152600
 isolation=$isolation
 codex=$codex
+cursorCli=$cli
 cursorKey=$cursorKey
 codexSha256=${if (config.codexSha256==null) "unset-elf-size-only" else "pinned"}
 lock=${java.nio.file.Files.exists(config.root.resolve("service.lock"))}

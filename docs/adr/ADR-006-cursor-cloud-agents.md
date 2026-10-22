@@ -18,3 +18,7 @@
 ## Что не меняется
 
 Журнал попыток, один Draft PR, UNKNOWN без повтора публикации, `exclude` для Issue #6 без `resume-status` и `resume-remote`, запрет merge. Локальный Codex и SSH в этом режиме не запускаются.
+
+## Профиль по умолчанию
+
+Рабочий путь по умолчанию — профиль `default`: runtime `cli`, auth `subscription`. Он запускает уже залогиненный Cursor CLI (`agent -p --trust --force --sandbox disabled`) и не читает `CURSOR_API_KEY`. Этот ADR остаётся только у профиля `cloud-api`, который выбирается явно. Каталог версий хранит модель, effort, runtime, auth, `maxCorrections` (0..2) и таймаут стадии (30..3600 с, по умолчанию 1200). Версия и закрепление за задачей не переписываются.
