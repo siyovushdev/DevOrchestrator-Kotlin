@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04 hosted runner currently denies bwrap netns (RTM_NEWADDR EPERM).
+    # Keep mandatory boundary tests on supported Ubuntu; never disable host AppArmor.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -21,8 +23,76 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.0'
+      - name: Linux execution boundary
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / -- /usr/bin/true
+      - name: Installed native Codex sandbox fixture (no inference or credentials)
+        shell: bash
+        run: |
+          # Native deny-tmp profiles must not hide their own executable/helper.
+          # This is disposable hosted-runner storage, not a controller installation.
+          native_fixture="$HOME/devorch-native-fixture"
+          npm install --prefix "$native_fixture" --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0-linux-x64
+          native_cli="$native_fixture/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
+          test -x "$native_cli"
+          echo "DEVORCH_CODEX_ISOLATION_BINARY=$native_cli" >> "$GITHUB_ENV"
+          echo "DEVORCH_REMOTE_NATIVE_CANARY_BINARY=$native_cli" >> "$GITHUB_ENV"
+      - name: Installed native Codex child canary (targeted first)
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon test --tests dev.orchestrator.agent.nativecli.InstalledCodexIsolationTest
+          canary_status=$?
+          python3 - <<'PYXML'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          report = Path('build/test-results/test/TEST-dev.orchestrator.agent.nativecli.InstalledCodexIsolationTest.xml')
+          if report.exists():
+              suite = ElementTree.parse(report).getroot()
+              print('INSTALLED_CODEX_CANARY_COUNTS', suite.attrib)
+              for failure in suite.findall('.//failure'):
+                  print(failure.attrib.get('message', ''))
+          PYXML
+          exit "$canary_status"
+      - name: Remote workflow and protocol regressions (no inference)
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon test --tests dev.orchestrator.remote.RemoteWorkerTest --tests dev.orchestrator.service.PersonalConfigTest --tests dev.orchestrator.service.RemoteWorkflowIntegrationTest
+          regression_status=$?
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          report = Path('build/test-results/test/TEST-dev.orchestrator.remote.RemoteWorkerTest.xml')
+          if report.exists():
+              suite = ElementTree.parse(report).getroot()
+              print('REMOTE_REGRESSION_COUNTS', suite.attrib)
+              for failure in suite.findall('.//failure'):
+                  # This fixture has artificial data/auth only; no inference.
+                  print(failure.attrib.get('message', '')[:12000])
+          PY
+          exit "$regression_status"
       - name: Build and unit tests
         run: gradle --no-daemon clean test build installDist
+      - name: PERSONAL distribution stays OFF without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          pilot_root=$(mktemp -d)
+          trap 'rm -rf "$pilot_root"' EXIT
+          mkdir -m 700 "$pilot_root/state" "$pilot_root/agent-home"
+          sed -e "s|^root=.*|root=$pilot_root/state|" \
+              -e "s|^agentHome=.*|agentHome=$pilot_root/agent-home|" \
+              config/personal.properties.example > "$pilot_root/personal.properties"
+          chmod 600 "$pilot_root/personal.properties"
+          app=./build/install/dev-orchestrator-kotlin/bin/dev-orchestrator-kotlin
+          "$app" service "$pilot_root/personal.properties" | tee "$pilot_root/off.log"
+          grep -Fx 'PERSONAL autonomy OFF' "$pilot_root/off.log"
+          "$app" status "$pilot_root/personal.properties" | grep -Fx 'No tasks'
+          test ! -e "$pilot_root/state/service.db"
+          echo PERSONAL_AUTONOMY_OFF_SMOKE_PASS
       - name: Running-server smoke test
         shell: bash
         run: |

@@ -324,7 +324,7 @@ class SqliteAgentCatalogTest {
             }
         }
         val migrated = SqliteTaskStore(path)
-        assertEquals(4, migrated.schemaVersion())
+        assertEquals(7, migrated.schemaVersion())
         assertEquals("source", assertNotNull(migrated.findPinnedGitHubIssue(101,7)).body)
         assertTrue(assertNotNull(migrated.findPolicy(101)).personalAutoExecution)
         val agent = SqliteAgentCatalog(path)

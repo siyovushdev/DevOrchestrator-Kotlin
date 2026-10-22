@@ -292,6 +292,31 @@ class SqliteTaskStore(databasePath: Path) {
      * This storage primitive does NOT authenticate GitHub: caller must use GitHubIssueReader.
      * Never runs agents, sends GitHub writes or advances workflow phases.
      */
+    /**
+     * Read-only precheck across the fetched batch, before the first workflow write.
+     * A GitHub stable Issue ID may not be rebound to another repository or number.
+     * acceptGitHubIssue repeats the check inside the write transaction.
+     */
+    internal fun ensureNoStoredGitHubIdentityCollision(issues: Collection<GitHubIssueRecord>) {
+        connection().use { conn ->
+            conn.prepareStatement(
+                "SELECT repository_id, issue_number FROM github_issue_snapshots WHERE github_issue_id = ?",
+            ).use { statement ->
+                for (issue in issues) {
+                    statement.setLong(1, issue.githubIssueId)
+                    statement.executeQuery().use { result ->
+                        if (result.next() && (result.getLong(1) != issue.repositoryId ||
+                                result.getInt(2) != issue.issueNumber)) {
+                            throw IllegalStateException(
+                                "GITHUB_STABLE_ISSUE_ID_CONFLICT: existing identity differs",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     internal fun acceptGitHubIssue(issue: GitHubIssueRecord, proposedWorkflowId: String): IssueIntakeReceipt {
         require(proposedWorkflowId.isNotBlank() && proposedWorkflowId.length <= 128)
         return transaction { conn ->
@@ -310,6 +335,17 @@ class SqliteTaskStore(databasePath: Path) {
             }
             // Repeat policy check INSIDE same transaction after network read, not just preflight.
             check(allowed) { "GitHub intake denied: unknown, WORK or disabled project" }
+            conn.prepareStatement(
+                "SELECT repository_id,issue_number FROM github_issue_snapshots WHERE github_issue_id=?",
+            ).use { statement ->
+                statement.setLong(1, issue.githubIssueId)
+                statement.executeQuery().use { stored ->
+                    if (stored.next() && (stored.getLong(1) != issue.repositoryId ||
+                            stored.getInt(2) != issue.issueNumber)) {
+                        throw IllegalStateException("GITHUB_STABLE_ISSUE_ID_CONFLICT")
+                    }
+                }
+            }
 
             val current = readWorkflow(conn, issue.repositoryId, issue.issueNumber)
             if (!issue.open && current == null) {
@@ -633,12 +669,24 @@ class SqliteTaskStore(databasePath: Path) {
                     SCHEMA_V4.forEach { sql -> db.createStatement().use { it.execute(sql) } }
                     db.createStatement().use { it.execute("PRAGMA user_version = 4") }
                 }
+                if (currentVersion < 5) {
+                    RuntimeSchema.v5.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 5") }
+                }
+                if (currentVersion < 6) {
+                    RuntimeSchema.v6.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 6") }
+                }
+                if (currentVersion < 7) {
+                    RuntimeSchema.v7.forEach { sql -> db.createStatement().use { it.execute(sql) } }
+                    db.createStatement().use { it.execute("PRAGMA user_version = 7") }
+                }
             }
         }
     }
 
     private companion object {
-        const val SCHEMA_VERSION = 4
+        const val SCHEMA_VERSION = 7
 
         val SCHEMA_V4 = listOf(
             """

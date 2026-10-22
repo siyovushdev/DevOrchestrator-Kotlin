@@ -17,7 +17,15 @@ fun Application.module() {
     }
 }
 
-fun main() {
+fun main(args: Array<String>) {
+    if (args.isNotEmpty()) {
+        try { dev.orchestrator.service.serviceCommand(args) }
+        catch (failure: dev.orchestrator.service.ServiceStopped) {
+            System.err.println(failure.message)
+            kotlin.system.exitProcess(70)
+        }
+        return
+    }
     val port = System.getenv("DEVORCH_PORT")
         ?.toIntOrNull()
         ?.takeIf { it in 1..65535 }

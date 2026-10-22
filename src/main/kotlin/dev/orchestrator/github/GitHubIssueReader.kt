@@ -3,8 +3,12 @@ package dev.orchestrator.github
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import dev.orchestrator.storage.GitHubIssueRecord
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -54,17 +58,46 @@ class HttpGitHubJsonRead(
                 if (!token.isNullOrBlank()) header("Authorization", "Bearer $token")
             }
             .GET().build()
+        // Do not materialize the whole HTTP response before validating its size.
         val response = try {
-            client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+            client.send(request, HttpResponse.BodyHandlers.ofInputStream())
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IOException("GitHub read interrupted", e)
         }
-        if (response.statusCode() != 200) {
-            throw IOException("GitHub GET failed: HTTP ${response.statusCode()}")
+        response.body().use { input ->
+            if (response.statusCode() != 200) {
+                throw IOException("GitHub GET failed: HTTP ${response.statusCode()}")
+            }
+            val contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1L)
+            if (contentLength > BoundedGitHubResponse.MAX_BYTES) {
+                throw IOException("GitHub GET response exceeds byte limit")
+            }
+            return BoundedGitHubResponse.read(input)
         }
-        check(response.body().length <= 5_000_000) { "Oversized GitHub API response" }
-        return response.body()
+    }
+}
+
+/** Response limit is enforced while bytes arrive. The caller closes the stream on failure. */
+internal object BoundedGitHubResponse {
+    const val MAX_BYTES = 5_000_000
+    fun read(input: InputStream, maxBytes: Int = MAX_BYTES): String {
+        require(maxBytes in 1..MAX_BYTES)
+        val accumulator = ByteArrayOutputStream(minOf(maxBytes, 8192))
+        val block = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val length = input.read(block, 0, minOf(block.size, maxBytes + 1 - total))
+            if (length < 0) break
+            if (length == 0) continue
+            total += length
+            if (total > maxBytes) throw IOException("GitHub GET response exceeds byte limit")
+            accumulator.write(block, 0, length)
+        }
+        return StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(accumulator.toByteArray())).toString()
     }
 }
 
@@ -94,6 +127,7 @@ class GitHubIssueReader(
         require(baseSha.matches(Regex("[0-9a-f]{40}"))) { "Missing GitHub base SHA" }
 
         val all = linkedMapOf<Int, GitHubIssueRecord>()
+        val stableIds = mutableMapOf<Long, Int>()
         var complete = false
         for (page in 1..5) {
             val response = decode(read.get(
@@ -128,6 +162,10 @@ class GitHubIssueReader(
                     baseSha = baseSha,
                     open = state == "open",
                 )
+                val priorNumber = stableIds.putIfAbsent(issue.githubIssueId, issue.issueNumber)
+                require(priorNumber == null || priorNumber == issue.issueNumber) {
+                    "Conflicting GitHub stable Issue ID across different numbers"
+                }
                 val previous = all.putIfAbsent(issue.issueNumber, issue)
                 require(previous == null || previous == issue) {
                     "GitHub Issue changed while paginating; fail closed"

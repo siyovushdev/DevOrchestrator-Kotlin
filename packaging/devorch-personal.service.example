@@ -1,0 +1,21 @@
+# EXAMPLE ONLY. No install/enable/linger is performed by this repository.
+# Must run as dedicated PERSONAL user devorch-e2e, after separate Owner GO.
+[Unit]
+Description=DevOrchestrator PERSONAL Issue to Draft PR
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/personal-service
+ExecStart=%h/personal-service/app/bin/dev-orchestrator-kotlin service %h/personal-service/personal.properties
+EnvironmentFile=%h/personal-service/controller.env
+UMask=0077
+Restart=on-failure
+# Fatal controller/configuration errors require Owner inspection, not a restart loop.
+RestartPreventExitStatus=70
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=150
+
+[Install]
+WantedBy=default.target
