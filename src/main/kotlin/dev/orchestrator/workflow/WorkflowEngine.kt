@@ -363,6 +363,8 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
             else -> check(remoteSite==null && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
         }
     }
+    fun resumeCliReview(issueNumber: Int): dev.orchestrator.profile.ReviewResume =
+        cliBridge?.resumeSaved(issueNumber) ?: dev.orchestrator.profile.ReviewResume.NOT_APPLICABLE
     fun checkRemote(id: String): String = cursorBridge?.check(id) ?: requireNotNull(remoteBridge).checkRemote(id)
     fun resumeRemote(id: String,digest: String): Boolean = cursorBridge?.resume(id,digest) ?: requireNotNull(remoteBridge).resume(id,digest)
 

@@ -7,6 +7,7 @@ import dev.orchestrator.storage.*
 import dev.orchestrator.workflow.*
 import dev.orchestrator.profile.CursorCliSettings
 import dev.orchestrator.profile.ExecutionProfileCatalog
+import dev.orchestrator.profile.ReviewResume
 import dev.orchestrator.cursor.CursorCloudHttpApi
 import dev.orchestrator.cursor.CursorCloudSettings
 import dev.orchestrator.cursor.CursorCloudWorkflowBridge
@@ -22,6 +23,7 @@ internal interface TaskRuntime {
     fun prepare(issue: GitHubIssueRecord)
     fun recover(issue: GitHubIssueRecord)
     fun step(issue: GitHubIssueRecord): TaskProgress
+    fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume = ReviewResume.NOT_APPLICABLE
     fun cancel(issue: GitHubIssueRecord): TaskProgress = TaskProgress("cancelled", reason="NOT_STARTED")
     fun summary(issue: GitHubIssueRecord): String = ""
     fun checkRemote(issue: GitHubIssueRecord,id: String): String = error("REMOTE_DISABLED")
@@ -216,6 +218,10 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             }
         }
     } catch (_: Exception) { "Отчёт: сохранённые итоги не прочитаны. Сырые логи не публикуются." }
+    override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume {
+        if (cli == null || !Files.isRegularFile(database(issue))) return ReviewResume.NOT_APPLICABLE
+        return engine(issue).resumeCliReview(issue.issueNumber)
+    }
     override fun step(issue: GitHubIssueRecord): TaskProgress {
         check(permitted(issue))
         if (ownerCancelRequested(config.root, issue.issueNumber)) return cancel(issue)

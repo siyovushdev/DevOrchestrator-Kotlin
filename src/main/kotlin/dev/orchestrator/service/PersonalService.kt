@@ -1,6 +1,7 @@
 package dev.orchestrator.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import dev.orchestrator.profile.ReviewResume
 import dev.orchestrator.storage.*
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -62,6 +63,31 @@ internal class PersonalService(private val file: Path, private val github: Servi
             Instant.parse(n["sourceUpdatedAt"].asText()),n["title"].asText(),n["body"].asText(),n["baseSha"].asText(),true),
             it.getString(2),it.getString(3),it.getString(4),it.getString(5))
     } }
+    private fun resumeInterruptedReview() {
+        val held = try { tasks().filter { it.state=="held" && it.reason=="INTERNAL_ACTION_ERROR" } } catch (_: Exception) { return }
+        if (held.isEmpty()) return
+        val failures = db.read { c ->
+            if (c.rows("SELECT 1 FROM sqlite_master WHERE name='personal_failures'") { 1 }.isEmpty()) emptyList()
+            else c.rows("SELECT id, diagnostic FROM personal_failures") { it.getLong(1) to it.getString(2) }
+        }
+        val parseIds = failures.filter { (_, diagnostic) ->
+            diagnostic.contains("parseVerdict") || diagnostic.contains("CursorCliWorkflowBridge.review")
+        }.map { it.first }
+        if (failures.isNotEmpty() && parseIds.isEmpty()) return
+        for (task in held) {
+            when (runtime.resumeSavedReview(task.issue)) {
+                ReviewResume.IMPORTED -> db.write { c ->
+                    if (parseIds.isNotEmpty()) c.mutate("DELETE FROM personal_failures WHERE id IN (${parseIds.joinToString(",")})")
+                    c.mutate("UPDATE personal_tasks SET state='active', stage='review', reason=NULL WHERE issue_id=? AND reason='INTERNAL_ACTION_ERROR'", task.issue.githubIssueId)
+                }
+                ReviewResume.MISSING -> db.write { c ->
+                    if (parseIds.isNotEmpty()) c.mutate("DELETE FROM personal_failures WHERE id IN (${parseIds.joinToString(",")})")
+                    c.mutate("UPDATE personal_tasks SET state='held', stage='held', reason='CLI_VERDICT_MISSING' WHERE issue_id=? AND reason='INTERNAL_ACTION_ERROR'", task.issue.githubIssueId)
+                }
+                ReviewResume.NOT_APPLICABLE -> {}
+            }
+        }
+    }
     private fun hold(i: GitHubIssueRecord,reason: String) = db.write { c ->
         if (reason=="STATUS_OUTCOME_UNKNOWN") {
             c.mutate("""UPDATE personal_tasks SET resume_state=CASE WHEN reason!='STATUS_OUTCOME_UNKNOWN' OR reason IS NULL THEN state ELSE resume_state END,
@@ -71,6 +97,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
     }
     private val terminalStages=setOf("cancelled","cancel-refused","released","timed_out","unattested")
     fun recover() {
+        resumeInterruptedReview()
         requireHealthy()
         for(t in tasks()) {
             if (t.stage in terminalStages) continue
@@ -84,6 +111,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
         }
     }
     fun tick(): String {
+        resumeInterruptedReview()
         requireHealthy()
         if(!permitted()) return "OFF"
         // An unresolved task blocks the entire one-worker queue, including different task databases.

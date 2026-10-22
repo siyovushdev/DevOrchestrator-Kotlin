@@ -18,6 +18,7 @@ import dev.orchestrator.storage.mutate
 import dev.orchestrator.storage.rows
 import dev.orchestrator.storage.WorkflowHold
 import dev.orchestrator.storage.WorkflowPhase
+import dev.orchestrator.storage.WorkflowSnapshot
 import dev.orchestrator.workflow.VerificationReceipt
 import dev.orchestrator.workflow.WorkflowEngine
 import java.nio.file.Files
@@ -25,6 +26,8 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Instant
+
+internal enum class ReviewResume { IMPORTED, MISSING, NOT_APPLICABLE }
 
 internal class CursorCliSettings(
     val cli: Path,
@@ -185,7 +188,9 @@ internal class CursorCliWorkflowBridge(private val engine: WorkflowEngine, priva
         val verified = engine.verification(w.id, w.correctionsUsed) ?: return "NO_VERIFICATION"
         val intent = engine.coding.find(verified.codingAttemptId) ?: return "NO_CODING"
         val id = "${w.id}-review-${w.correctionsUsed}"
-        launch(id)?.let { return blocked(w.id, it) }
+        val existing = launch(id)
+        if (existing == "FINISHED") return "ALREADY_IMPORTED"
+        if (existing != null) return continueSaved(w, id)
         if (!cliPresent()) return refuse(w.id, id, "CLI_MISSING")
         val candidate = FrozenCandidate.reopen(Path.of(verified.directory), verified.manifestSha256)
         val before = RemoteProtocol.tree(intent.workspace, Files.createTempDirectory(engine.artifactRoot, "cli-review-tree-"))
@@ -238,19 +243,62 @@ ${mapper.writeValueAsString(verdict)}
         if (!cursorCliSucceeded(spawned.stdout)) return refuse(w.id, id, "CLI_STAGE_FAILED")
         val after = RemoteProtocol.tree(intent.workspace, Files.createTempDirectory(engine.artifactRoot, "cli-review-after-"))
         if (after != before) return refuse(w.id, id, "CLI_TREE_CHANGED")
-        val parsed = parseVerdict(spawned.stdout)
-        val findings = parsed["findings"].map { check(it.isTextual && it.asText().isNotBlank()); it.asText() }
-        val parsedVerdict = ReviewVerdict.valueOf(parsed.path("verdict").asText())
-        check(parsedVerdict != ReviewVerdict.NOT_RUN && (parsedVerdict == ReviewVerdict.PASS) == findings.isEmpty())
+        return concludeReview(w, id, assigned, candidate, verified, spawned.stdout, observed.evidence, output)
+    }
+
+    /** A saved exit 0 review is imported. It does not spawn another reviewer. */
+    internal fun resumeSaved(number: Int): ReviewResume {
+        val w = engine.store.findWorkflow(engine.repositoryId, number) ?: return ReviewResume.NOT_APPLICABLE
+        if (w.phase != WorkflowPhase.REVIEWING || w.hold != WorkflowHold.NONE) return ReviewResume.NOT_APPLICABLE
+        val id = "${w.id}-review-${w.correctionsUsed}"
+        val state = launch(id) ?: return ReviewResume.NOT_APPLICABLE
+        if (state == "FINISHED") return ReviewResume.NOT_APPLICABLE
+        val saved = matchingReceipt(w.id) ?: return ReviewResume.NOT_APPLICABLE
+        if (!successfulReceipt(saved)) return ReviewResume.NOT_APPLICABLE
+        continueSaved(w, id)
+        val after = engine.store.findWorkflow(engine.repositoryId, number) ?: return ReviewResume.MISSING
+        return if (after.hold == WorkflowHold.NONE && (after.phase == WorkflowPhase.READY_FOR_PR || after.phase == WorkflowPhase.QUEUED))
+            ReviewResume.IMPORTED else ReviewResume.MISSING
+    }
+
+    private fun continueSaved(w: WorkflowSnapshot, id: String): String {
+        val saved = matchingReceipt(w.id) ?: return blocked(w.id, "LAUNCHING")
+        if (!successfulReceipt(saved)) return refuse(w.id, id, "CLI_STAGE_FAILED")
+        val verified = engine.verification(w.id, w.correctionsUsed) ?: return refuse(w.id, id, "NO_VERIFICATION")
+        val intent = engine.coding.find(verified.codingAttemptId) ?: return refuse(w.id, id, "NO_CODING")
+        val candidate = try { FrozenCandidate.reopen(Path.of(verified.directory), verified.manifestSha256) }
+            catch (_: Exception) { return verdictMissing(w.id, id) }
+        val after = RemoteProtocol.tree(intent.workspace, Files.createTempDirectory(engine.artifactRoot, "cli-review-after-"))
+        if (after != verified.candidateTree) return refuse(w.id, id, "CLI_TREE_CHANGED")
+        val assigned = engine.catalog.findAssignedProfile(engine.repositoryId, AgentRole.REVIEW) ?: return verdictMissing(w.id, id)
+        val output = Files.createDirectories(engine.artifactRoot.resolve(id))
+        return concludeReview(w, id, assigned, candidate, verified, saved.stdout, saved.evidence, output)
+    }
+
+    private fun concludeReview(
+        w: WorkflowSnapshot, id: String, assigned: dev.orchestrator.agent.AssignedAgentProfile,
+        candidate: FrozenCandidate, verified: dev.orchestrator.workflow.VerificationReceipt,
+        stdout: String, process: com.fasterxml.jackson.databind.JsonNode, output: Path,
+    ): String {
+        val parsed = parseVerdict(stdout) ?: return verdictMissing(w.id, id)
+        val parsedVerdict = try { ReviewVerdict.valueOf(parsed.path("verdict").asText()) }
+            catch (_: Exception) { return verdictMissing(w.id, id) }
+        if (parsedVerdict == ReviewVerdict.NOT_RUN || !parsed.path("findings").isArray) return verdictMissing(w.id, id)
+        val findings = mutableListOf<String>()
+        for (item in parsed.path("findings")) {
+            if (!item.isTextual || item.asText().isBlank()) return verdictMissing(w.id, id)
+            findings.add(item.asText())
+        }
+        if ((parsedVerdict == ReviewVerdict.PASS) != findings.isEmpty()) return verdictMissing(w.id, id)
         val session = sessionId(id)
-        check(session != verified.codingSessionId)
+        if (session == verified.codingSessionId) return verdictMissing(w.id, id)
         writeSession(output.resolve("events.log"), session)
         val receipt = ReviewReceipt(candidate.candidateId, id, session, candidate.manifestSha256, verified.candidateTree, w.correctionsUsed, parsedVerdict)
         val disposition = ReviewEvidencePolicy.evaluate(candidate, receipt, candidate.manifestSha256, w.correctionsUsed, engine.limit(w.id, w.correctionsUsed))
-        db.write { c ->
-            check(c.mutate("UPDATE agent_attempts SET state='SUCCEEDED' WHERE attempt_id=? AND state='RUNNING'", id) == 1)
+        val saved = db.write { c ->
+            if (c.mutate("UPDATE agent_attempts SET state='SUCCEEDED' WHERE attempt_id=? AND state='RUNNING'", id) != 1) return@write false
             engine.event(c, w.id, "REVIEW_COMPLETED", mapper.writeValueAsString(mapOf(
-                "receipt" to receipt, "findings" to findings, "process" to observed.evidence, "artifacts" to output.toString(),
+                "receipt" to receipt, "findings" to findings, "process" to process, "artifacts" to output.toString(),
                 "profile_id" to assigned.profile.profileId, "profile_version" to assigned.profile.version,
                 "assignment_version" to assigned.assignment.assignmentVersion, "manifest_version" to assigned.manifest.version,
                 "adapter" to "cursor-cli",
@@ -260,9 +308,53 @@ ${mapper.writeValueAsString(verdict)}
                 ReviewDisposition.CORRECTION_REQUIRED -> engine.correction(c, w, verified.candidateTree, findings.joinToString("\n"))
                 ReviewDisposition.NEEDS_OWNER -> engine.hold(c, w.id, "CORRECTION_LIMIT_OR_REVIEW_BINDING")
             }
+            true
         }
+        if (!saved) return verdictMissing(w.id, id)
         finish(id, "FINISHED")
         return parsedVerdict.name
+    }
+
+    private data class SavedCli(val stdout: String, val evidence: com.fasterxml.jackson.databind.JsonNode)
+
+    private fun matchingReceipt(workflow: String): SavedCli? {
+        val root = engine.artifactRoot
+        if (!Files.isDirectory(root)) return null
+        val starts = engine.store.listEvents(workflow).filter { it.type == "REVIEW_PROCESS_STARTED" }.map { mapper.readTree(it.detail) }
+        val found = Files.list(root).use { stream ->
+            stream.filter { Files.isDirectory(it) && it.fileName.toString().startsWith("cli-spawn-") }.toList()
+        }.mapNotNull { dir ->
+            val receipt = dir.resolve("supervisor-receipt.json")
+            val log = dir.resolve("events.log")
+            if (!Files.isRegularFile(receipt) || !Files.isRegularFile(log)) return@mapNotNull null
+            val evidence = mapper.readTree(Files.readString(receipt))
+            val identityMatches = starts.any { detail ->
+                val identity = detail.path("identity")
+                identity.path("pid").asText() == evidence.path("supervisor").path("pid").asText() &&
+                    identity.path("start_ticks").asText() == evidence.path("supervisor").path("start_ticks").asText() &&
+                    identity.path("boot_id").asText() == evidence.path("boot_id").asText() &&
+                    identity.path("machine_id").asText() == evidence.path("machine_id").asText()
+            }
+            if (!identityMatches) return@mapNotNull null
+            SavedCli(Files.readString(log), evidence)
+        }
+        return found.singleOrNull()
+    }
+
+    private fun successfulReceipt(saved: SavedCli): Boolean =
+        saved.evidence.path("exit_code").asInt(-1) == 0 &&
+            saved.evidence.path("cause").asText() == "exited" &&
+            saved.evidence.path("cleanup_echild").asBoolean(false) &&
+            cursorCliSucceeded(saved.stdout)
+
+    private fun verdictMissing(workflow: String, attemptId: String): String {
+        finish(attemptId, "FAILED")
+        db.write { c ->
+            c.mutate("UPDATE agent_attempts SET state='FAILED' WHERE attempt_id=? AND state IN ('STARTING','RUNNING')", attemptId)
+            engine.event(c, workflow, "CLI_STAGE_REFUSED", mapper.writeValueAsString(mapOf("attemptId" to attemptId, "adapter" to "cursor-cli", "reason" to "CLI_VERDICT_MISSING")))
+            engine.hold(c, workflow, "CLI_VERDICT_MISSING")
+        }
+        return "CLI_VERDICT_MISSING"
     }
 
     private data class Spawned(val observation: ProcessObservation, val stdout: String)
@@ -388,21 +480,78 @@ ${mapper.writeValueAsString(verdict)}
             return found.lastOrNull()
         }
 
-        private fun parseVerdict(text: String): ObjectNode {
+        /** A verdict may be a bare object or nested in the CLI result text. Missing means no verdict, not a crash. */
+        internal fun parseVerdict(text: String): ObjectNode? {
             val mapper = ObjectMapper()
+            val found = linkedMapOf<String, ObjectNode>()
+            val seen = HashSet<String>()
             fun match(node: com.fasterxml.jackson.databind.JsonNode): ObjectNode? {
                 if (node !is ObjectNode) return null
-                val fields = node.fieldNames().asSequence().toSet()
-                return if (fields == setOf("verdict", "candidate_id", "manifest_sha256", "candidate_tree", "generation", "findings")) node else null
+                val names = listOf("verdict", "candidate_id", "manifest_sha256", "candidate_tree", "generation", "findings")
+                if (!names.all { node.has(it) } || !node.path("findings").isArray) return null
+                if (node.path("verdict").asText() !in setOf("PASS", "CHANGES_REQUIRED")) return null
+                if (node.path("candidate_id").asText().isBlank() || node.path("manifest_sha256").asText().isBlank() ||
+                    node.path("candidate_tree").asText().isBlank() || node.path("generation").isNull) return null
+                return node
             }
-            val lines = text.lineSequence().map { it.trim() }.filter { it.startsWith("{") }.mapNotNull { line ->
-                try { match(mapper.readTree(line)) } catch (_: Exception) { null }
-            }.toList()
-            if (lines.size == 1) return lines.single()
-            val start = text.indexOf('{')
-            val end = text.lastIndexOf('}')
-            require(start >= 0 && end > start)
-            return requireNotNull(match(mapper.readTree(text.substring(start, end + 1))))
+            fun remember(node: ObjectNode) {
+                val key = listOf("verdict", "candidate_id", "manifest_sha256", "candidate_tree", "generation").joinToString("|") { node.path(it).asText() } +
+                    "|" + node.path("findings").toString()
+                found.putIfAbsent(key, node)
+            }
+            val reader = object {
+                fun scan(body: String) {
+                    var index = 0
+                    while (index < body.length) {
+                        val start = body.indexOf('{', index)
+                        if (start < 0) break
+                        val end = balancedEnd(body, start)
+                        if (end < start) break
+                        val slice = body.substring(start, end + 1)
+                        index = end + 1
+                        if (!seen.add(slice)) continue
+                        val node = try { mapper.readTree(slice) } catch (_: Exception) { continue }
+                        walk(node)
+                    }
+                }
+                fun walk(node: com.fasterxml.jackson.databind.JsonNode) {
+                    match(node)?.let { remember(it) }
+                    when {
+                        node.isObject -> node.fields().forEach { (_, value) ->
+                            if (value.isTextual) scan(value.asText()) else walk(value)
+                        }
+                        node.isArray -> node.forEach { walk(it) }
+                    }
+                }
+            }
+            reader.scan(text)
+            return found.values.singleOrNull()
+        }
+
+        private fun balancedEnd(text: String, start: Int): Int {
+            var depth = 0
+            var inString = false
+            var escape = false
+            for (index in start until text.length) {
+                val char = text[index]
+                if (inString) {
+                    when {
+                        escape -> escape = false
+                        char == '\\' -> escape = true
+                        char == '"' -> inString = false
+                    }
+                    continue
+                }
+                when (char) {
+                    '"' -> inString = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return index
+                    }
+                }
+            }
+            return -1
         }
 
         private fun launches(db: dev.orchestrator.storage.RuntimeDatabase) {

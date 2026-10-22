@@ -8,6 +8,7 @@ import dev.orchestrator.service.PersonalRuntime
 import dev.orchestrator.storage.AttemptState
 import dev.orchestrator.storage.GitHubIssueRecord
 import dev.orchestrator.storage.RuntimeDatabase
+import dev.orchestrator.storage.mutate
 import dev.orchestrator.storage.rows
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.Test
@@ -48,6 +49,96 @@ class CursorCliStageTest {
         }
         assertEquals(2, stages.map { it[0] }.toSet().size)
         assertTrue(stages.all { it[1] == "cursor-cli" && it[2] == "cli" && it[3] == "subscription" && it[4] == "account-default" && it[5] == "DEFAULT" })
+    }
+
+    @Test fun `verdict nested in the CLI result text is accepted and a missing verdict does not throw`() {
+        val verdict = """{"verdict":"PASS","candidate_id":"candidate","manifest_sha256":"${"ab".repeat(32)}","candidate_tree":"${"cd".repeat(20)}","generation":0,"findings":[]}"""
+        val nested = """{"type":"result","subtype":"success","is_error":false,"result":${ObjectMapper().writeValueAsString("Review notes\n$verdict")}}"""
+        val parsed = CursorCliWorkflowBridge.parseVerdict(nested)
+        assertEquals("PASS", parsed?.path("verdict")?.asText())
+        assertEquals("candidate", parsed?.path("candidate_id")?.asText())
+        assertEquals(null, CursorCliWorkflowBridge.parseVerdict("""{"type":"result","subtype":"success","is_error":false,"result":"no verdict here"}"""))
+        val cli = fixture("nested")
+        val log = temp.resolve("agent.log")
+        val world = runtime(cli, null)
+        world.runtime.prepare(world.issue)
+        val progress = mutableListOf<String>()
+        repeat(3) { progress += world.runtime.step(world.issue).stage }
+        assertEquals(listOf("tests", "review", "review"), progress)
+        assertEquals(2, Files.readAllLines(log).size)
+        val states = RuntimeDatabase(world.task.resolve("run.db")).read { c ->
+            c.rows("SELECT state FROM cli_stage_runs ORDER BY recorded_at") { it.getString(1) }
+        }
+        assertEquals(listOf("FINISHED", "FINISHED"), states)
+    }
+
+    @Test fun `a saved exit zero review is imported on the next step without a second spawn`() {
+        val cli = fixture("success")
+        val log = temp.resolve("agent.log")
+        val world = runtime(cli, null)
+        world.runtime.prepare(world.issue)
+        assertEquals("tests", world.runtime.step(world.issue).stage)
+        assertEquals("review", world.runtime.step(world.issue).stage)
+        assertEquals(1, Files.readAllLines(log).size)
+        val db = RuntimeDatabase(world.task.resolve("run.db"))
+        val mapper = ObjectMapper()
+        val verified = mapper.readTree(db.read { c -> c.rows("SELECT evidence FROM workflow_verifications") { it.getString(1) }.single() })
+        val workflow = db.read { c -> c.rows("SELECT workflow_id, version, corrections_used FROM workflows") { listOf(it.getString(1), it.getLong(2).toString(), it.getInt(3).toString()) }.single() }
+        val codingId = verified.path("codingAttemptId").asText()
+        val context = db.read { c ->
+            c.rows("SELECT issue_body_sha256, base_sha, policy_version, assignment_version, profile_id, profile_version, adapter_id, manifest_version, workspace, repository_id, issue_number FROM attempt_contexts WHERE attempt_id=?", codingId) {
+                listOf(it.getString(1), it.getString(2), it.getInt(3).toString(), it.getInt(4).toString(), it.getString(5), it.getLong(6).toString(), it.getString(7), it.getLong(8).toString(), it.getString(9), it.getLong(10).toString(), it.getInt(11).toString())
+            }.single()
+        }
+        val reviewId = "${workflow[0]}-review-${workflow[2]}"
+        val verdict = mapper.createObjectNode()
+        verdict.put("verdict", "PASS")
+        verdict.put("candidate_id", verified.path("candidateId").asText())
+        verdict.put("manifest_sha256", verified.path("manifestSha256").asText())
+        verdict.put("candidate_tree", verified.path("candidateTree").asText())
+        verdict.put("generation", verified.path("generation").asInt())
+        verdict.putArray("findings")
+        val stdout = mapper.createObjectNode()
+        stdout.put("type", "result")
+        stdout.put("subtype", "success")
+        stdout.put("is_error", false)
+        stdout.put("result", "Saved review\n${mapper.writeValueAsString(verdict)}")
+        val spawn = Files.createDirectories(world.task.resolve("artifacts").resolve("cli-spawn-saved"))
+        Files.writeString(spawn.resolve("events.log"), mapper.writeValueAsString(stdout))
+        Files.writeString(spawn.resolve("supervisor-receipt.json"), """{"exit_code":0,"cause":"exited","cleanup_echild":true,"boot_id":"boot","machine_id":"machine","supervisor":{"pid":42,"start_ticks":"99"},"child":{"pid":43,"start_ticks":"100"},"reaped":1}""")
+        val started = """{"attempt_id":"$reviewId","identity":{"pid":"42","start_ticks":"99","boot_id":"boot","machine_id":"machine"},"adapter":"cursor-cli"}"""
+        db.write { c ->
+            c.mutate("INSERT INTO agent_attempts(attempt_id,workflow_id,role,generation,state,source_tree,recorded_at) VALUES (?,?,'REVIEW',?,'RUNNING',?,?)",
+                reviewId, workflow[0], workflow[2].toInt(), verified.path("candidateTree").asText(), "t")
+            c.mutate("""INSERT INTO attempt_contexts(attempt_id,repository_id,issue_number,issue_body_sha256,base_sha,policy_version,assignment_version,
+                profile_id,profile_version,adapter_id,manifest_version,workspace,planned_workflow_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                reviewId, context[9].toLong(), context[10].toInt(), context[0], context[1], context[2].toInt(), context[3].toInt(), context[4], context[5].toLong(), context[6], context[7].toLong(), verified.path("directory").asText(), workflow[1].toLong() + 1)
+            c.mutate("""INSERT INTO review_inputs(attempt_id,workflow_id,generation,candidate_id,manifest_sha256,candidate_tree,candidate_directory,coding_session_id)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                reviewId, workflow[0], workflow[2].toInt(), verified.path("candidateId").asText(), verified.path("manifestSha256").asText(), verified.path("candidateTree").asText(), verified.path("directory").asText(), verified.path("codingSessionId").asText())
+            c.mutate("""INSERT INTO cli_stage_runs(attempt_id,workflow_id,adapter,runtime,auth,model,effort,state,recorded_at) VALUES (?,?,?,?,?,?,?,'LAUNCHING',?)""",
+                reviewId, workflow[0], "cursor-cli", "cli", "subscription", "account-default", "DEFAULT", "t")
+            c.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES (?, 'REVIEW_PROCESS_STARTED', ?, 't')", workflow[0], started)
+        }
+        val progress = world.runtime.step(world.issue)
+        assertEquals("review", progress.stage, progress.reason)
+        assertEquals(1, Files.readAllLines(log).size)
+        assertEquals("FINISHED", db.read { c -> c.rows("SELECT state FROM cli_stage_runs WHERE attempt_id=?", reviewId) { it.getString(1) }.single() })
+    }
+
+    @Test fun `a review without a verdict holds and does not spawn another reviewer`() {
+        val cli = fixture("noverdict")
+        val log = temp.resolve("agent.log")
+        val world = runtime(cli, null)
+        world.runtime.prepare(world.issue)
+        assertEquals("tests", world.runtime.step(world.issue).stage)
+        assertEquals("review", world.runtime.step(world.issue).stage)
+        val held = world.runtime.step(world.issue)
+        assertEquals("held", held.stage)
+        assertEquals("CLI_VERDICT_MISSING", held.reason)
+        assertEquals(2, Files.readAllLines(log).size)
+        world.runtime.step(world.issue)
+        assertEquals(2, Files.readAllLines(log).size)
     }
 
     @Test fun `exit zero with a live child finishes coding after the child is reaped`() {
@@ -169,6 +260,19 @@ print('{"type":"result","subtype":"success","is_error":true}')
             "nonzero" -> """
 print('{"type":"result","subtype":"success","is_error":false}')
 raise SystemExit(2)
+"""
+            "nested", "noverdict" -> """
+if "Review the saved" in prompt:
+    start = prompt.rfind('{"verdict"')
+    verdict = prompt[start:].strip()
+    import json
+    text = verdict if ${if (kind == "nested") "True" else "False"} else "I looked and found no structured verdict."
+    print(json.dumps({"type":"result","subtype":"success","is_error":False,"result": text}))
+    raise SystemExit(0)
+pathlib.Path("clamp.py").write_text("def clamp(value, low, high):\n    return min(high, max(low, value))\n")
+pathlib.Path("tests").mkdir(exist_ok=True)
+pathlib.Path("tests/test_clamp.py").write_text("import unittest\nfrom clamp import clamp\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, clamp(1, 0, 2))\n")
+print('{"type":"result","subtype":"success","is_error":false}')
 """
             else -> """
 if "Review the saved" in prompt:

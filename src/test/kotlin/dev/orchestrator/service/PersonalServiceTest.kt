@@ -1,5 +1,6 @@
 package dev.orchestrator.service
 
+import dev.orchestrator.profile.ReviewResume
 import dev.orchestrator.storage.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -21,6 +22,8 @@ class PersonalServiceTest {
     private var crashPrepare=false
     private var crashStep=false
     private var progress=TaskProgress("tests")
+    private var resume=ReviewResume.NOT_APPLICABLE
+    private var resumes=0
     private var records=listOf(issue())
     private val github=object: ServiceGitHub {
         override fun issues()=records
@@ -33,9 +36,23 @@ class PersonalServiceTest {
         override fun prepare(issue: GitHubIssueRecord) { prepares++; if(crashPrepare) throw SimulatedCrash() }
         override fun recover(issue: GitHubIssueRecord) { recoveries++ }
         override fun step(issue: GitHubIssueRecord): TaskProgress { steps++; if(crashStep) throw SimulatedCrash(); return progress }
+        override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume { resumes++; return resume }
     }
     private class SimulatedCrash: Error()
     private fun service()=PersonalService(database,github,runtime,{enabled})
+    @Test fun `an internal review parse hold is imported on the next tick without release`() {
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        RuntimeDatabase(database).write { c ->
+            c.mutate("UPDATE personal_tasks SET state='held', stage='held', reason='INTERNAL_ACTION_ERROR'")
+            c.mutate("INSERT INTO personal_failures(recorded_at, diagnostic) VALUES ('t', 'parseVerdict')")
+        }
+        resume=ReviewResume.IMPORTED
+        assertEquals("ACTIVE", s.tick())
+        assertEquals(1, resumes)
+        assertEquals(1, steps)
+        assertEquals(0, RuntimeDatabase(database).read { c -> c.rows("SELECT diagnostic FROM personal_failures") { it.getString(1) }.size })
+        assertEquals("active", RuntimeDatabase(database).read { c -> c.rows("SELECT state FROM personal_tasks") { it.getString(1) }.single() })
+    }
     @Test fun confirmedLostPostIsReadOnlyCheckedAndExplicitlyResumedWithoutDuplicate() {
         loseStatus=true
         val s=service(); assertEquals("NEEDS_OWNER",s.tick())

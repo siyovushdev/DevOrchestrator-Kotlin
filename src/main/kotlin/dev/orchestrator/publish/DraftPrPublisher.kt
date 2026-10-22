@@ -190,7 +190,7 @@ internal class DraftPrPublisher(
         }
         val events=store.listEvents(w.id)
         fun started(type: String,n: JsonNode) = events.filter { it.type==type }.map { mapper.readTree(it.detail) }
-            .any { birthMatches(n,it) }
+            .any { birthMatches(n,it) || birthMatches(n,it.path("identity")) }
         val remote=dev.orchestrator.workflow.RemoteWorkflowBridge.site(database,w.id)!=null
         val cursor=dev.orchestrator.cursor.CursorCloudWorkflowBridge.site(database,w.id)!=null
         check(!(remote && cursor))
