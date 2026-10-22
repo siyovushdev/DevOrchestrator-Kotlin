@@ -8,8 +8,9 @@ It does not prove model/auth/proxy inference or this new Runner on HOME.
 ## What runs
 
 `NativeCodingRunner.run(attemptId)` is an internal, synchronous trusted call on
-one configured PERSONAL repository/Issue #1, with a Coding child deadline of
-120 seconds (or the stricter profile timeout), 1 MiB event capture/read limits
+one configured PERSONAL repository/Issue, with a Coding child deadline of
+the operator stage budget (default 20 minutes, hard cap 60 minutes; see
+[OPERATOR.md](OPERATOR.md)), 1 MiB event capture/read limits
 and no retries. Git probes have separate 8-second bounds and cleanup/receipt
 collection has bounded grace periods. Last-message oversize is monitored and
 rejected; this is not a hard disk quota. It reuses

@@ -201,6 +201,14 @@ ${testAttacks.prependIndent("  ")}
         assertEquals(1,workflow().correctionsUsed)
     }
 
+    @Test fun modelStageDeadlineKeepsAFiniteCeilingAboveThePilotCap() {
+        assertFails {
+            WorkflowEngine(database,repo,binary,home,artifacts,snapshots,timeout=Duration.ofSeconds((StageBudget.MAX_SECONDS+1).toLong()))
+        }
+        WorkflowEngine(database,repo,binary,home,artifacts,snapshots,timeout=Duration.ofSeconds(StageBudget.MAX_SECONDS.toLong()))
+        assertFails { NativeCodingRunner(database,repo,binary,home,artifacts,timeout=Duration.ofSeconds((StageBudget.MAX_SECONDS+1).toLong())) }
+    }
+
     @Test fun ownerCeilingBlocksTheNextCorrectionWithoutRaisingTheStoredCap() {
         setup(review=changes)
         assertEquals("PASS", engine().step())

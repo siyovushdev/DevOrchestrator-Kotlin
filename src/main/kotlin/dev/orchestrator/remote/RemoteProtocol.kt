@@ -1,5 +1,7 @@
 package dev.orchestrator.remote
 
+import dev.orchestrator.agent.StageBudget
+
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import dev.orchestrator.agent.nativecli.BoundedNativeProbeReader
@@ -123,16 +125,16 @@ internal class RemoteRequest(bytes: ByteArray) {
         RemoteTaskIdentity(i["attemptId"].asText(),i["workflowId"].asText(),i["issueNumber"].asInt(),i["baseSha"].asText(),i["sourceTree"].asText(),i["generation"].asInt(),i["role"].asText(),i["candidateId"].asText(),i["manifestSha256"].asText(),i["codingSessionId"].asText())
         require(n["workerSha256"].asText()==RemoteProtocol.installationDigest() && n["files"].isArray)
         require(n["prompt"].isTextual && n["prompt"].asText().toByteArray().size<=65536 && n["model"].asText().matches(Regex("[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")))
-        require(n["effort"].asText() in setOf("default","low","medium","high","xhigh") && n["minimumTests"].isInt && n["minimumTests"].asInt() in 1..10000 && n["timeoutMs"].isIntegralNumber && n["timeoutMs"].asLong() in 50..120000)
+        require(n["effort"].asText() in setOf("default","low","medium","high","xhigh") && n["minimumTests"].isInt && n["minimumTests"].asInt() in 1..10000 && n["timeoutMs"].isIntegralNumber && n["timeoutMs"].asLong() in 50L..StageBudget.MAX_MILLIS)
         val bundle=Base64.getDecoder().decode(n["bundle"].asText())
         require(bundle.size<=4*1024*1024 && RemoteProtocol.digest(bundle)==n["bundleSha256"].asText())
     }
     companion object {
         /** Caller must supply an already Owner-authorized PERSONAL checkout; not an Issue-facing API. */
         fun capture(identity: RemoteTaskIdentity,checkout: Path,scratch: Path,prompt: String,
-                    model: String="fixture-model",effort: String="default",minimumTests: Int=1,timeoutMs: Long=120000,
+                    model: String="fixture-model",effort: String="default",minimumTests: Int=1,timeoutMs: Long=StageBudget.DEFAULT_SECONDS * 1000L,
                     source: Path=checkout): RemoteRequest {
-            require(prompt.toByteArray().size<=65536 && minimumTests in 1..10000 && timeoutMs in 50..120000)
+            require(prompt.toByteArray().size<=65536 && minimumTests in 1..10000 && timeoutMs in 50L..StageBudget.MAX_MILLIS)
             require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")) && effort in setOf("default","low","medium","high","xhigh"))
             require(TrustedGitCheckoutGuard.accepts(checkout))
             require(RemoteProtocol.git(checkout,"rev-parse","HEAD")==identity.baseSha)

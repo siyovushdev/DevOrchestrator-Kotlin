@@ -1,5 +1,6 @@
 package dev.orchestrator.service
 
+import dev.orchestrator.agent.StageBudget
 import dev.orchestrator.storage.RuntimeDatabase
 import dev.orchestrator.storage.mutate
 import dev.orchestrator.storage.rows
@@ -18,7 +19,7 @@ internal data class ExecutionLimits(
     val reviewTimeoutSeconds: Int,
 ) {
     companion object {
-        val DEFAULT = ExecutionLimits(2, 120, 120)
+        val DEFAULT = ExecutionLimits(2, StageBudget.DEFAULT_SECONDS, StageBudget.DEFAULT_SECONDS)
     }
 }
 
@@ -26,14 +27,24 @@ internal fun ownerCancelFlag(root: Path, issueNumber: Int): Path =
     root.resolve("control").resolve("cancel-$issueNumber")
 
 internal fun ensureOwnerSchema(c: Connection) {
-    c.mutate("""CREATE TABLE IF NOT EXISTS owner_limits(
+    val limitsSql = """CREATE TABLE IF NOT EXISTS owner_limits(
         scope TEXT PRIMARY KEY,
         max_corrections INTEGER NOT NULL CHECK(max_corrections BETWEEN 0 AND 2),
-        coding_timeout_seconds INTEGER NOT NULL CHECK(coding_timeout_seconds BETWEEN 1 AND 120),
-        review_timeout_seconds INTEGER NOT NULL CHECK(review_timeout_seconds BETWEEN 1 AND 120),
+        coding_timeout_seconds INTEGER NOT NULL CHECK(coding_timeout_seconds BETWEEN ${StageBudget.MIN_SECONDS} AND ${StageBudget.MAX_SECONDS}),
+        review_timeout_seconds INTEGER NOT NULL CHECK(review_timeout_seconds BETWEEN ${StageBudget.MIN_SECONDS} AND ${StageBudget.MAX_SECONDS}),
         version INTEGER NOT NULL CHECK(version > 0),
         actor TEXT NOT NULL,
-        recorded_at TEXT NOT NULL)""")
+        recorded_at TEXT NOT NULL)"""
+    c.mutate(limitsSql)
+    val existing = c.rows("SELECT sql FROM sqlite_master WHERE type='table' AND name='owner_limits'") { it.getString(1) }.singleOrNull().orEmpty()
+    if (existing.contains("BETWEEN 1 AND 120")) {
+        c.mutate("ALTER TABLE owner_limits RENAME TO owner_limits_pilot")
+        c.mutate(limitsSql.replace("IF NOT EXISTS ", ""))
+        c.mutate("""INSERT INTO owner_limits(scope,max_corrections,coding_timeout_seconds,review_timeout_seconds,version,actor,recorded_at)
+            SELECT scope,max_corrections,MAX(${StageBudget.MIN_SECONDS},coding_timeout_seconds),
+            MAX(${StageBudget.MIN_SECONDS},review_timeout_seconds),version,actor,recorded_at FROM owner_limits_pilot""")
+        c.mutate("DROP TABLE owner_limits_pilot")
+    }
     c.mutate("""CREATE TABLE IF NOT EXISTS owner_cancels(
         issue_number INTEGER PRIMARY KEY CHECK(issue_number > 0),
         state TEXT NOT NULL,
@@ -69,7 +80,9 @@ internal fun writeExecutionLimits(
     actor: String = "owner:local-command",
 ): String {
     require(scope == "default" || scope.matches(Regex("issue:[1-9][0-9]*")))
-    require(limits.maxCorrections in 0..2 && limits.codingTimeoutSeconds in 1..120 && limits.reviewTimeoutSeconds in 1..120) {
+    require(limits.maxCorrections in 0..2 &&
+        limits.codingTimeoutSeconds in StageBudget.MIN_SECONDS..StageBudget.MAX_SECONDS &&
+        limits.reviewTimeoutSeconds in StageBudget.MIN_SECONDS..StageBudget.MAX_SECONDS) {
         "LIMIT_OUTSIDE_CODE_CAP"
     }
     require(actor.matches(Regex("owner:[A-Za-z0-9._:-]{1,64}")))
@@ -170,7 +183,7 @@ internal fun describeOwnerControls(database: Path): String {
                 "Cancel #${it.getInt(1)}: ${it.getString(2)} ${it.getString(3)}"
             }
         if (limits.isEmpty() && cancels.isEmpty()) return@use ""
-        (listOf("Limits code cap: corrections<=2, stage<=120s") + limits + cancels).joinToString("\n")
+        (listOf("Limits code cap: corrections<=2, stage<=${StageBudget.MAX_SECONDS}s") + limits + cancels).joinToString("\n")
     }
 }
 
@@ -189,6 +202,6 @@ internal fun formatOwnerReport(
         "CHANGES_REQUIRED" -> "Независимое ревью: " + findings.take(5).joinToString("; ") { plain(it) }.take(500)
         else -> "Независимое ревью: нет сохранённого вердикта."
     }
-    val risk = "Риски: слияние вручную; денежный лимит провайдера не контролируется; исправлений не больше 2; стадия не дольше 120 с."
+    val risk = "Риски: слияние вручную; денежный лимит провайдера не контролируется; исправлений не больше 2; стадия не дольше ${StageBudget.MAX_SECONDS} с."
     return listOf(tests, review, risk).joinToString("\n").take(1200)
 }

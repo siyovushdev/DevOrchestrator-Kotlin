@@ -1,6 +1,7 @@
 package dev.orchestrator.remote
 
 import com.fasterxml.jackson.databind.node.ObjectNode
+import dev.orchestrator.agent.StageBudget
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -65,6 +66,12 @@ print('{"type":"turn.completed"}')
     private fun journal()=RemoteAttemptJournal(temp.resolve("controller.db"))
     private fun client(j: RemoteAttemptJournal=journal(),t: WorkerTransport=transport())=RemoteWorkerClient(j,t,RemoteEvidence(scratch))
 
+    @Test fun remoteStageDeadlineMatchesTheFiniteOperatorCeiling() {
+        setup()
+        assertEquals(StageBudget.MAX_MILLIS, request(timeout=StageBudget.MAX_MILLIS).json["timeoutMs"].asLong())
+        assertFails { request(timeout=StageBudget.MAX_MILLIS+1) }
+        assertTrue(Files.readString(worker).contains("<= ${StageBudget.MAX_MILLIS}"))
+    }
     @Test fun workflowPreparationAndTransportClaimRollbackTogetherBeforeAnyExchange() {
         setup(); val j=journal(); val r=request(); var exchanges=0
         val c=client(j,WorkerTransport { _,_ -> exchanges++; error("must not send") })

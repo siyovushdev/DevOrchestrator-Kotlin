@@ -77,7 +77,7 @@ for profile precedence; compatibility with the pinned CLI is tested separately.
 The synthetic canary is not a promise that arbitrary VM configuration is safe.
 
 Limits: 24 MiB request/result, 8 MiB file image, 1 MiB/file, 1000 files, 2000 walked
-directories, 4 MiB bundle, 64 KiB prompt; 120 s task deadline plus cleanup. Captured
+directories, 4 MiB bundle, 64 KiB prompt; stage deadline follows the operator limit, at most 60 minutes, plus cleanup. Captured
 files have a kernel 24 MiB file-size ceiling and a 1 MiB evidence acceptance limit.
 This is a bounded pilot, not #44 dynamic limits or a disk/memory quota manager.
 All requests/evidence contain untrusted task content and stay in private storage;

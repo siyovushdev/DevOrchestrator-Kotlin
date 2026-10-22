@@ -212,7 +212,8 @@ def request(data):
         raise ValueError('identity mismatch')
     if i['role'] != 'CODING' and (not ident(i['candidateId']) or not hexsha(i['manifestSha256'], 64) or not ident(i['codingSessionId'])):
         raise ValueError('candidate binding required')
-    if not isinstance(r['prompt'], str) or len(r['prompt'].encode()) > 65536 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}', r['model']) or r['effort'] not in ('default', 'low', 'medium', 'high', 'xhigh') or type(r['timeoutMs']) is not int or not 50 <= r['timeoutMs'] <= 120000 or type(r['minimumTests']) is not int or not 1 <= r['minimumTests'] <= 10000:
+    # Keep in lockstep with StageBudget.MAX_MILLIS. Finite; not the old 120s pilot cap.
+    if not isinstance(r['prompt'], str) or len(r['prompt'].encode()) > 65536 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}', r['model']) or r['effort'] not in ('default', 'low', 'medium', 'high', 'xhigh') or type(r['timeoutMs']) is not int or not 50 <= r['timeoutMs'] <= 3600000 or type(r['minimumTests']) is not int or not 1 <= r['minimumTests'] <= 10000:
         raise ValueError('execution parameters')
     image(r['files'])
     bundle = base64.b64decode(r['bundle'], validate=True)

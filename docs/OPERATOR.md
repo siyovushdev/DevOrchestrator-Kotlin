@@ -20,8 +20,8 @@ Merge всегда вручную. Команды ниже не открываю
 ```
 dev-orchestrator-kotlin doctor /absolute/personal.properties
 dev-orchestrator-kotlin status /absolute/personal.properties
-dev-orchestrator-kotlin limits /absolute/personal.properties default 2 120 120
-dev-orchestrator-kotlin limits /absolute/personal.properties 17 1 60 90
+dev-orchestrator-kotlin limits /absolute/personal.properties default 2 1200 1200
+dev-orchestrator-kotlin limits /absolute/personal.properties 17 1 900 900
 dev-orchestrator-kotlin cancel /absolute/personal.properties 17
 dev-orchestrator-kotlin run /absolute/personal.properties
 dev-orchestrator-kotlin service /absolute/personal.properties
@@ -30,10 +30,13 @@ dev-orchestrator-kotlin service /absolute/personal.properties
 `doctor` и `status` ничего не запускают и не требуют токен.
 `limits` и `cancel` тоже не требуют токен и не запускают модель.
 
-Лимиты: число циклов исправления 0..2, таймаут Coding и Review 1..120 секунд.
-Это потолок уже существующего кода, его нельзя поднять командой.
+Лимиты: число циклов исправления 0..2. Таймаут Coding и Review — от 30 секунд до 60 минут
+(3600 с). По умолчанию 20 минут (1200 с) на каждую стадию. Это потолок всего процесса
+`codex exec`: старт, прокси и все раунды инструментов, не один HTTP-запрос к модели.
+Прежний пилот 120 с для такого хода не хватает. Выше 60 минут команда не поднимает.
 Значение для номера Issue важнее `default` и действует на следующие стадии.
 Уже запущенный процесс не продлевается. Завершённые стадии и отправленные PUSH/POST не меняются.
+Загрузка Git и публикация ветки остаются на своём пределе 120 с; это не время модели.
 
 `cancel` записывает намерение. Ожидающая задача не стартует. Идущая локальная стадия
 останавливается только если supervisor доказал завершение всех потомков; иначе задача

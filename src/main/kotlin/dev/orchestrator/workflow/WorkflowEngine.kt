@@ -38,7 +38,7 @@ internal class WorkflowEngine(
     private val snapshotRoot: Path,
     internal val minimumTests: Int = 1,
     internal val correctionLimit: Int = 2,
-    internal val timeout: Duration = Duration.ofSeconds(120),
+    internal val timeout: Duration = Duration.ofSeconds(StageBudget.DEFAULT_SECONDS.toLong()),
     private val git: Path = Path.of("/usr/bin/git"),
     private val python: Path = Path.of("/usr/bin/python3"),
     private val proxyPort: Int = 10809,
@@ -58,7 +58,7 @@ internal class WorkflowEngine(
 
     init {
         require(repositoryId>0 && minimumTests in 1..10000 && correctionLimit in 0..2)
-        require(timeout.toMillis() in 50..120000 && proxyPort in 1..65535)
+        require(timeout.toMillis() in 50L..StageBudget.MAX_MILLIS && proxyPort in 1..65535)
     }
 
     /** One persisted action per call. Repeated terminal/pending calls do not launch twice. */

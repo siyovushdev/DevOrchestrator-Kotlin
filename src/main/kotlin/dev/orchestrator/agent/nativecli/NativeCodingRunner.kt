@@ -2,6 +2,7 @@ package dev.orchestrator.agent.nativecli
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import dev.orchestrator.agent.AgentRole
+import dev.orchestrator.agent.StageBudget
 import dev.orchestrator.agent.SqliteAgentCatalog
 import dev.orchestrator.storage.AttemptState
 import dev.orchestrator.storage.CodingAttemptJournal
@@ -38,7 +39,7 @@ internal class NativeCodingRunner(
     private val artifactRoot: Path,
     private val git: Path = Path.of("/usr/bin/git"),
     private val python: Path = Path.of("/usr/bin/python3"),
-    private val timeout: Duration = Duration.ofSeconds(120),
+    private val timeout: Duration = Duration.ofSeconds(StageBudget.DEFAULT_SECONDS.toLong()),
     private val outputLimit: Int = 1_048_576,
     private val proxyPort: Int = 10809,
     private val ownerGo: () -> Boolean = { true },
@@ -52,7 +53,7 @@ internal class NativeCodingRunner(
     private val gitReader = BoundedNativeProbeReader(maxOutputBytes=1_000_000)
 
     init {
-        require(repositoryId>0 && timeout.toMillis() in 50..120_000)
+        require(repositoryId>0 && timeout.toMillis() in 50L..StageBudget.MAX_MILLIS)
         require(outputLimit in 1024..1_048_576 && proxyPort in 1..65535)
     }
 

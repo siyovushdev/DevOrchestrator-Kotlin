@@ -1,6 +1,8 @@
 package dev.orchestrator.service
 
+import dev.orchestrator.agent.StageBudget
 import org.junit.jupiter.api.Test
+import java.sql.DriverManager
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
@@ -56,17 +58,38 @@ model=fake-model
         serviceCommand(arrayOf("limits", file.toString(), "default", "1", "30", "45"))
         val db=temp.resolve("state/service.db")
         assertEquals(ExecutionLimits(1,30,45), readExecutionLimits(db, 8))
-        serviceCommand(arrayOf("limits", file.toString(), "9", "0", "15", "20"))
-        assertEquals(ExecutionLimits(0,15,20), readExecutionLimits(db, 9))
+        serviceCommand(arrayOf("limits", file.toString(), "9", "0", "60", "90"))
+        assertEquals(ExecutionLimits(0,60,90), readExecutionLimits(db, 9))
         assertEquals(ExecutionLimits(1,30,45), readExecutionLimits(db, 8))
-        serviceCommand(arrayOf("limits", file.toString(), "default", "1", "30", "45"))
+        assertEquals(ExecutionLimits.DEFAULT, readExecutionLimits(temp.resolve("missing-limits.db"), 3))
+        serviceCommand(arrayOf("limits", file.toString(), "default", "2", StageBudget.DEFAULT_SECONDS.toString(), StageBudget.MAX_SECONDS.toString()))
+        assertEquals(ExecutionLimits(2, StageBudget.DEFAULT_SECONDS, StageBudget.MAX_SECONDS), readExecutionLimits(db, 8))
         serviceCommand(arrayOf("cancel", file.toString(), "9"))
         assertTrue(java.nio.file.Files.isRegularFile(temp.resolve("state/control/cancel-9")))
         assertTrue(readLocalServiceStatus(db).contains("corrections=0"))
+        assertTrue(readLocalServiceStatus(db).contains("stage<=${StageBudget.MAX_SECONDS}s"))
         serviceCommand(arrayOf("doctor", file.toString()))
         assertFails { serviceCommand(arrayOf("limits", file.toString(), "default", "3", "30", "45")) }
-        assertFails { serviceCommand(arrayOf("limits", file.toString(), "default", "1", "121", "45")) }
-        assertEquals(ExecutionLimits(1,30,45), readExecutionLimits(db, 8))
+        assertFails { serviceCommand(arrayOf("limits", file.toString(), "default", "1", "${StageBudget.MAX_SECONDS + 1}", "45")) }
+        assertFails { serviceCommand(arrayOf("limits", file.toString(), "default", "1", "${StageBudget.MIN_SECONDS - 1}", "45")) }
+        assertEquals(ExecutionLimits(2, StageBudget.DEFAULT_SECONDS, StageBudget.MAX_SECONDS), readExecutionLimits(db, 8))
+    }
+    @Test fun pilotLimitTableAcceptsTheRaisedFiniteCeiling() {
+        val file=setup()
+        val db=temp.resolve("state/service.db")
+        DriverManager.getConnection("jdbc:sqlite:$db").use { connection ->
+            connection.createStatement().execute("""CREATE TABLE owner_limits(
+                scope TEXT PRIMARY KEY,
+                max_corrections INTEGER NOT NULL CHECK(max_corrections BETWEEN 0 AND 2),
+                coding_timeout_seconds INTEGER NOT NULL CHECK(coding_timeout_seconds BETWEEN 1 AND 120),
+                review_timeout_seconds INTEGER NOT NULL CHECK(review_timeout_seconds BETWEEN 1 AND 120),
+                version INTEGER NOT NULL CHECK(version > 0),
+                actor TEXT NOT NULL,
+                recorded_at TEXT NOT NULL)""")
+            connection.createStatement().execute("INSERT INTO owner_limits VALUES ('issue:4',1,120,120,1,'owner:local-command','t')")
+        }
+        serviceCommand(arrayOf("limits", file.toString(), "4", "1", StageBudget.DEFAULT_SECONDS.toString(), StageBudget.DEFAULT_SECONDS.toString()))
+        assertEquals(ExecutionLimits(1, StageBudget.DEFAULT_SECONDS, StageBudget.DEFAULT_SECONDS), readExecutionLimits(db, 4))
     }
     @Test fun symlinkAndSharedStateAreRejected() {
         val file=setup(); val link=Files.createSymbolicLink(temp.resolve("config-link"),file)

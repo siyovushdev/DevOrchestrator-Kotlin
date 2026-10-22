@@ -2,6 +2,21 @@ package dev.orchestrator.agent
 
 import dev.orchestrator.storage.ProjectKind
 
+/**
+ * Wall-clock budget for one Coding or Review process.
+ * Git fetch and publication keep their own shorter deadlines.
+ * 120s was the pilot cap around the whole `codex exec` process, including startup,
+ * proxy and every tool round. A real turn does not fit there. The ceiling stays finite.
+ */
+internal object StageBudget {
+    const val MIN_SECONDS = 30
+    const val DEFAULT_SECONDS = 1200
+    const val MAX_SECONDS = 3600
+    const val MAX_MILLIS = MAX_SECONDS * 1000L
+    const val TRANSPORT_GRACE_MILLIS = 15_000L
+    const val MAX_TRANSPORT_MILLIS = MAX_MILLIS + TRANSPORT_GRACE_MILLIS
+}
+
 /** Roles and settings are typed. They are NOT CLI arguments or OS permissions. */
 enum class AgentRole { CODING, REVIEW, PLANNER, CHIEF }
 enum class ReasoningEffort { DEFAULT, LOW, MEDIUM, HIGH, XHIGH }

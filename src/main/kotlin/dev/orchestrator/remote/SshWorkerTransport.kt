@@ -1,5 +1,7 @@
 package dev.orchestrator.remote
 
+import dev.orchestrator.agent.StageBudget
+
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -44,7 +46,7 @@ internal class SshWorkerTransport(private val config: SshWorkerConfig): WorkerTr
 /** Also used by offline fake-SSH tests; production has no configurable executable/command. */
 internal object WorkerWireProcess {
     fun exchange(command: List<String>, wire: ByteArray, timeoutMs: Long): ByteArray {
-        require(wire.size<=2*RemoteProtocol.LIMIT && timeoutMs in 1..150000)
+        require(wire.size<=2*RemoteProtocol.LIMIT && timeoutMs in 1..StageBudget.MAX_TRANSPORT_MILLIS)
         val process=ProcessBuilder(command).apply {
             environment().clear(); environment().putAll(mapOf("PATH" to "/usr/bin:/bin","LANG" to "C.UTF-8","HOME" to "/nonexistent"))
         }.start()

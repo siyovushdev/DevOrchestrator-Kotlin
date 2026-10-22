@@ -89,7 +89,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             val id=role.name.lowercase()
             catalog.saveProfile(AgentProfile(id,1,repo,role,"codex-cli",1,"openai",config.model,ReasoningEffort.DEFAULT,
                 if (role==AgentRole.CODING) AgentSandbox.NATIVE_PERSONAL_WRITE else AgentSandbox.NATIVE_PERSONAL_READ_ONLY,
-                120,100_000),null,"owner:personal-service")
+                StageBudget.MAX_SECONDS,100_000),null,"owner:personal-service")
             catalog.bindRole(repo,role,id,1,null,"owner:personal-service")
         }
         if(remote==null) for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
