@@ -44,6 +44,7 @@ internal class NativeCodingRunner(
     private val proxyPort: Int = 10809,
     private val ownerGo: () -> Boolean = { true },
     private val stopRequested: () -> Boolean = { false },
+    private val fixtureCli: Boolean = false,
 ) {
     private val databasePath=database.toAbsolutePath().normalize()
     private val store = SqliteTaskStore(database)
@@ -137,6 +138,11 @@ internal class NativeCodingRunner(
         }
         if (stopRequested()) return complete(AttemptState.CANCELLED,"OWNER_STOP_BEFORE_START")
         if (!ownerGo() || !journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
+        if (!fixtureCli) {
+            if (!CodexAttestation.nativeBinary(codex.toRealPath())) return complete(AttemptState.FAILED,"CODEX_NOT_ATTESTED")
+            if (!LocalSecretCanary.pass(codex.toRealPath(), intent.workspace, home, artifacts, python))
+                return complete(AttemptState.FAILED,"CODEX_CANARY_FAILED")
+        }
         val observation = NativeProcessRunner(python,outputLimit).run(
             LinuxIsolation.prefix(intent.workspace,true,home,codex,output)+command.argumentVector,intent.workspace,
             childEnv,artifacts,prompt,limitMs,lastMessage,stopRequested=stopRequested) { birth ->
@@ -147,6 +153,8 @@ internal class NativeCodingRunner(
         val observed = observation.evidence
         if (observation.state != AttemptState.SUCCEEDED)
             return complete(observation.state,observation.reason,observed)
+        if (!fixtureCli && !CodexAttestation.providerTurn(Files.readString(artifacts.resolve("events.log"))))
+            return complete(AttemptState.FAILED,"CODEX_NOT_ATTESTED",observed)
         try {
             boundedFile(lastMessage,outputLimit)
             if (!sourceMatches(intent.workspace,intent.baseSha,false))

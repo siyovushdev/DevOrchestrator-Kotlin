@@ -78,6 +78,11 @@ internal class RemoteWorkerClient(private val journal: RemoteAttemptJournal,priv
         // Any exception after durable intent leaves UNKNOWN; never infer that no remote exec occurred.
         return exchange(request,wire,request.json["timeoutMs"].asLong()+15000)
     }
+    /** Ask the guest to stop. The response is not evidence and is never imported. */
+    fun cancelGuest(request: RemoteRequest) {
+        val wire=RemoteProtocol.mapper.writeValueAsBytes(mapOf("op" to "cancel","attemptId" to request.attemptId,"requestSha256" to request.sha256))
+        try { transport.exchange(wire, 15_000) } catch (_: Exception) { }
+    }
     fun reconcile(id: String): String {
         val saved=requireNotNull(journal.find(id))
         if(saved.state=="EVIDENCE_STORED") return saved.state

@@ -84,11 +84,22 @@ with Path('launches').open('a') as out: out.write('one\n')
     }
 
     private fun runner(timeout: Duration = Duration.ofSeconds(3), outputLimit: Int = 1_048_576,
-                       fixedRepo: Long = repo) = NativeCodingRunner(database,fixedRepo,binary,home,artifacts,
-        timeout=timeout,outputLimit=outputLimit)
+                       fixedRepo: Long = repo, fixture: Boolean = true) = NativeCodingRunner(database,fixedRepo,binary,home,artifacts,
+        timeout=timeout,outputLimit=outputLimit,fixtureCli=fixture)
 
     private fun claimCount(): Int = DriverManager.getConnection("jdbc:sqlite:$database").use { c ->
         c.createStatement().use { it.executeQuery("SELECT COUNT(*) FROM runtime_reservations").use { r -> r.next(); r.getInt(1) } }
+    }
+
+    @Test fun scriptWithExitZeroAndTwoJsonEventsIsNotTreatedAsCodex() {
+        setup(success)
+        val result = runner(fixture=false).run("attempt")
+        assertEquals(AttemptState.FAILED, result.state)
+        assertEquals("CODEX_NOT_ATTESTED", result.reason)
+        assertEquals(WorkflowHold.NEEDS_OWNER, store.findWorkflow(repo,1)?.hold)
+        assertEquals("CODEX_NOT_ATTESTED", store.findWorkflow(repo,1)?.holdReason)
+        assertNotEquals(WorkflowPhase.VERIFYING, store.findWorkflow(repo,1)?.phase)
+        assertFalse(Files.exists(clone.resolve("launches")))
     }
 
     @Test fun capturesRealCandidateAndPinnedProcessReceiptWithExplicitChildProxyAndNoReplay() {

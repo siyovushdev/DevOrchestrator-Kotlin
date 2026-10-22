@@ -66,6 +66,28 @@ print('{"type":"turn.completed"}')
     private fun journal()=RemoteAttemptJournal(temp.resolve("controller.db"))
     private fun client(j: RemoteAttemptJournal=journal(),t: WorkerTransport=transport())=RemoteWorkerClient(j,t,RemoteEvidence(scratch))
 
+    @Test fun cancelStopsGuestProcessAndDoesNotWriteFinishedResult() {
+        setup()
+        val sleep=ProcessBuilder("/bin/sleep","30").start()
+        val stat=java.nio.file.Files.readString(java.nio.file.Path.of("/proc/${sleep.pid()}/stat"))
+        val ticks=stat.substringAfterLast(')').trim().split(Regex("\\s+"))[19]
+        val boot=java.nio.file.Files.readString(java.nio.file.Path.of("/proc/sys/kernel/random/boot_id")).trim()
+        val attempt=root.resolve("a1"); java.nio.file.Files.createDirectory(attempt)
+        val body="cancel-request".toByteArray()
+        java.nio.file.Files.write(attempt.resolve("request.json"), body)
+        val digest=java.security.MessageDigest.getInstance("SHA-256").digest(body).joinToString("") { "%02x".format(it) }
+        java.nio.file.Files.writeString(attempt.resolve("started.json"), RemoteProtocol.mapper.writeValueAsString(mapOf(
+            "boot_id" to boot, "supervisor" to mapOf("pid" to sleep.pid(), "start_ticks" to ticks))))
+        val wire=RemoteProtocol.mapper.writeValueAsBytes(mapOf("op" to "cancel","attemptId" to "a1","requestSha256" to digest))
+        val proc=ProcessBuilder("/usr/bin/python3","-I","-S",worker.toString(),"serve",config.toString()).start()
+        proc.outputStream.use { it.write(wire); it.write('\n'.code) }
+        val out=proc.inputStream.readNBytes(8000).toString(Charsets.UTF_8)
+        assertTrue(proc.waitFor(5, TimeUnit.SECONDS) && proc.exitValue()==0, out)
+        assertFalse(sleep.isAlive)
+        assertTrue(java.nio.file.Files.exists(attempt.resolve("cancel.request")))
+        assertFalse(java.nio.file.Files.exists(attempt.resolve("result.json")))
+        assertTrue(out.contains("CANCEL_REQUESTED"))
+    }
     @Test fun remoteStageDeadlineMatchesTheFiniteOperatorCeiling() {
         setup()
         assertEquals(StageBudget.MAX_MILLIS, request(timeout=StageBudget.MAX_MILLIS).json["timeoutMs"].asLong())

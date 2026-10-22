@@ -59,6 +59,13 @@ def run(config):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    # Only the controller-owned supervisor should die with its parent. The SSH
+    # guest calls this same function and must survive a dropped serve process.
+    if os.environ.get("DEVORCH_DIE_WITH_PARENT") == "1":
+        if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "parent-death signal unavailable")
+        if os.getppid() == 1:
+            raise RuntimeError("parent already exited")
     started = time.monotonic()
     environment = dict(config["env"])
     for name in config.get("private_env_names", []):

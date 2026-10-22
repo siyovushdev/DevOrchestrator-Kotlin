@@ -223,6 +223,43 @@ class PersonalServiceTest {
         assertEquals(0, steps); assertEquals(1, prepares)
         assertTrue(posts.any { it.contains("не успешная отмена") })
     }
+    @Test fun publishedRefusalStaysTerminalOnTheNextTick() {
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        val refusing=object: TaskRuntime by runtime {
+            override fun cancel(issue: GitHubIssueRecord)=TaskProgress("done","https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/7","ALREADY_PUBLISHED")
+            override fun step(issue: GitHubIssueRecord): TaskProgress { steps++; return progress }
+        }
+        requestOwnerCancel(database, database.parent, 17)
+        val cancelling=PersonalService(database, github, refusing, {enabled})
+        assertEquals("ALREADY_PUBLISHED", cancelling.tick())
+        assertEquals("IDLE", cancelling.tick())
+        val stage=RuntimeDatabase(database).read { it.rows("SELECT state,stage FROM personal_tasks") { it.getString(1)+"/"+it.getString(2) }.single() }
+        assertEquals("done/cancel-refused", stage)
+        assertEquals(0, steps)
+        assertTrue(posts.any { it.contains("не закрывает") })
+        assertFalse(posts.any { it.contains("Готов черновик") })
+    }
+    @Test fun releaseLetsTheQueueContinueWithoutDeletingTheDatabaseOrStepping() {
+        records=listOf(issue(17), issue(18))
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        RuntimeDatabase(database).write { it.mutate("UPDATE personal_tasks SET state='held',reason='PREPARATION_INTERRUPTED'") }
+        assertEquals("RELEASED", s.releaseHeld(17))
+        assertTrue(java.nio.file.Files.isRegularFile(database))
+        assertEquals("ACTIVE", s.tick())
+        assertEquals(2, prepares); assertEquals(0, steps)
+        val released=RuntimeDatabase(database).read { it.rows("SELECT stage FROM personal_tasks WHERE number=17") { it.getString(1) }.single() }
+        assertEquals("released", released)
+    }
+    @Test fun timeoutEndsThatTaskAndStartsTheNext() {
+        records=listOf(issue(17), issue(18))
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        progress=TaskProgress("timed_out", reason="STAGE_TIMEOUT")
+        assertEquals("TIMED_OUT", s.tick())
+        assertEquals("ACTIVE", s.tick())
+        assertEquals(2, prepares)
+        val stage=RuntimeDatabase(database).read { it.rows("SELECT stage FROM personal_tasks WHERE number=17") { it.getString(1) }.single() }
+        assertEquals("timed_out", stage)
+    }
     @Test fun singleWorkerLockAndReadOnlyStatusWorkTogether() {
         service()
         ServiceLock(temp).use { assertFails { ServiceLock(temp) }; assertEquals("No tasks",readLocalServiceStatus(database)) }

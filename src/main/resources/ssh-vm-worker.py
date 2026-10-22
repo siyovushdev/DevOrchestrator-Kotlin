@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import signal
 import stat
 import subprocess
 import sys
@@ -363,7 +364,10 @@ def execute(c, attempt):
             raw = supervisor.run({'argv': argv, 'cwd': str(source), 'env': child_env,
                                   'timeout_ms': r['timeoutMs'], 'namespace_boundary': role == 'TESTS'})
         write(attempt / 'supervisor.json', encoded(raw))
-        if not raw.get('cleanup_echild'):
+        if (attempt / 'cancel.request').exists() or (raw and raw.get('cause') in ('timeout', 'stop_requested')):
+            write(attempt / 'failure.json', encoded({'state': 'UNKNOWN', 'code': 'CANCELLED_OR_NOT_EXITED'}))
+            return
+        if not raw or not raw.get('cleanup_echild'):
             raise ValueError('cleanup not proven')
         files = inventory(source)
         output_tree = tree(source, attempt / 'output-tree')
@@ -388,6 +392,31 @@ def execute(c, attempt):
             pass
         # A failure receipt is diagnostic only; no positive success or cleanup is invented.
         write(attempt / 'failure.json', encoded({'state': 'UNKNOWN', 'code': 'EXECUTION_OR_EVIDENCE_FAILED'}))
+
+
+def cancel_guest(root, attempt_id, digest):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', attempt_id) or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise ValueError('cancel identity')
+    attempt = root / attempt_id
+    if not attempt.exists():
+        return {'state': 'NOT_FOUND'}
+    if sha(read(attempt / 'request.json')) != digest:
+        raise ValueError('cancel digest mismatch')
+    if not (attempt / 'cancel.request').exists():
+        write(attempt / 'cancel.request', b'OWNER_CANCEL')
+    if (attempt / 'started.json').exists() and not (attempt / 'result.json').exists():
+        started = load(read(attempt / 'started.json'))
+        try:
+            pid = int(started['supervisor']['pid'])
+            current = supervisor_module().identity(pid)
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            if current == started['supervisor'] and boot == started['boot_id']:
+                os.kill(pid, signal.SIGTERM)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    if not (attempt / 'result.json').exists() and not (attempt / 'failure.json').exists():
+        write(attempt / 'failure.json', encoded({'state': 'UNKNOWN', 'code': 'OWNER_CANCEL'}))
+    return {'state': 'CANCEL_REQUESTED'}
 
 
 def query(root, attempt_id, digest):
@@ -422,6 +451,8 @@ def serve(c, config_path):
     root = Path(c['root'])
     if wire.get('op') == 'query' and set(wire) == {'op', 'attemptId', 'requestSha256'}:
         return query(root, wire['attemptId'], wire['requestSha256'])
+    if wire.get('op') == 'cancel' and set(wire) == {'op', 'attemptId', 'requestSha256'}:
+        return cancel_guest(root, wire['attemptId'], wire['requestSha256'])
     if set(wire) != {'op', 'requestBase64'} or wire['op'] != 'submit':
         raise ValueError('operation')
     data = base64.b64decode(wire['requestBase64'], validate=True)

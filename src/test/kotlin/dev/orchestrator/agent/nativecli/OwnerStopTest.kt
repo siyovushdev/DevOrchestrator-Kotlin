@@ -30,4 +30,27 @@ class OwnerStopTest {
         assertEquals("OWNER_STOP", observed.reason)
         assertTrue(observed.evidence?.path("cleanup_echild")?.asBoolean() == true)
     }
+
+    @Test fun supervisorStopsTheChildWhenItsParentExits() {
+        val artifacts=Files.createDirectory(temp.resolve("artifacts"))
+        val helper=artifacts.resolve("supervisor.py")
+        javaClass.getResourceAsStream("/native-codex-supervisor.py")!!.use { Files.copy(it, helper) }
+        val receipt=artifacts.resolve("supervisor-receipt.json")
+        val config=artifacts.resolve("launch.json")
+        Files.writeString(config, """{"argv":["/bin/sleep","30"],"cwd":"${artifacts}","env":{"PATH":"/usr/bin:/bin"},"timeout_ms":20000,"receipt":"${receipt}"}""")
+        val parent=artifacts.resolve("parent.py")
+        Files.writeString(parent, """
+import os, subprocess, sys, time
+env=os.environ.copy(); env['DEVORCH_DIE_WITH_PARENT']='1'
+child=subprocess.Popen([sys.executable,'-I','-S',sys.argv[1],sys.argv[2]], env=env)
+time.sleep(0.4)
+os._exit(0)
+""".trimIndent())
+        val proc=ProcessBuilder("/usr/bin/python3", parent.toString(), helper.toString(), config.toString()).start()
+        assertTrue(proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS))
+        val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(8)
+        while (!Files.exists(receipt) && System.nanoTime()<deadline) Thread.sleep(50)
+        val text=Files.readString(receipt)
+        assertTrue(text.contains("stop_requested") || text.contains("supervisor_error"), text)
+    }
 }

@@ -66,6 +66,9 @@ object CodexExecCommandPlanner {
         val args = mutableListOf(
             verifiedBinary.toString(),
             "exec",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
             "--sandbox",
             when (sandbox) {
                 AgentSandbox.NATIVE_PERSONAL_WRITE -> "workspace-write"

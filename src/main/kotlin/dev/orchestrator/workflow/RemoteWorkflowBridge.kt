@@ -2,6 +2,7 @@ package dev.orchestrator.workflow
 
 import com.fasterxml.jackson.databind.JsonNode
 import dev.orchestrator.agent.*
+import dev.orchestrator.agent.nativecli.CodexAttestation
 import dev.orchestrator.remote.*
 import dev.orchestrator.review.*
 import dev.orchestrator.storage.*
@@ -109,6 +110,12 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
                 engine.bump(c,w.id); engine.event(c,w.id,"REMOTE_ACTION_INTENT",mapper.writeValueAsString(mapOf("attemptId" to id,"requestSha256" to request.sha256,"peer" to settings.peer)))
             }
             if(state!="EVIDENCE_STORED") { hold(w.id,id); return "REMOTE_UNKNOWN_NEEDS_OWNER" }
+            if(engine.stopRequested() || importBlocked(id)) {
+                blockImport(id)
+                try { client.cancelGuest(request) } catch (_: Exception) {}
+                cancelWithoutImport(w.id, id)
+                return "CANCELLED"
+            }
             return complete(id,null)
         } catch(_: RemoteExchangeUnknown) { hold(w.id,id); return "REMOTE_UNKNOWN_NEEDS_OWNER" }
         catch(e: Exception) { hold(w.id,id); throw e } // internal failures are diagnosed by the service, never GitHub availability
@@ -130,6 +137,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     }
     fun resume(id: String,digest: String): Boolean {
         require(RemoteProtocol.sha(digest,64))
+        if(engine.stopRequested() || importBlocked(id)) return false
         val a=action(id) ?: return false
         val saved=journal.find(id) ?: return false
         if(saved.state!="EVIDENCE_STORED" || RemoteProtocol.digest(saved.evidence!!)!=digest || !engine.ownerGo()) return false
@@ -148,8 +156,25 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         complete(id,digest); return true
     }
     private fun hold(workflow: String,id: String)=db.write { c -> engine.hold(c,workflow,"REMOTE_ACTION_UNKNOWN:$id") }
+    private fun importBlocked(id: String)=db.read { c ->
+        c.rows("SELECT 1 FROM sqlite_master WHERE name='remote_import_blocks'") { 1 }.isNotEmpty() &&
+            c.rows("SELECT 1 FROM remote_import_blocks WHERE attempt_id=?",id) { 1 }.isNotEmpty()
+    }
+    private fun blockImport(id: String)=db.write { c ->
+        c.mutate("CREATE TABLE IF NOT EXISTS remote_import_blocks(attempt_id TEXT PRIMARY KEY, reason TEXT NOT NULL)")
+        c.mutate("INSERT OR IGNORE INTO remote_import_blocks(attempt_id,reason) VALUES(?,'OWNER_CANCEL')",id)
+    }
+    /** Drop the phase without copying guest files into a candidate or publication. */
+    private fun cancelWithoutImport(workflow: String, id: String)=db.write { c ->
+        c.mutate("UPDATE agent_attempts SET state='CANCELLED' WHERE attempt_id=? AND state IN ('STARTING','RUNNING','PLANNED')",id)
+        c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",id)
+        c.mutate("""UPDATE workflows SET phase='CANCELLED',hold='NONE',hold_reason='OWNER_CANCELLED',version=version+1,updated_at=?
+            WHERE workflow_id=? AND phase NOT IN ('DRAFT_PR_CREATED','CANCELLED')""",Instant.now().toString(),workflow)
+        engine.event(c,workflow,"OWNER_CANCELLED","REMOTE_NO_IMPORT:$id")
+    }
 
     private fun complete(id: String,ownerDigest: String?): String {
+        if(importBlocked(id)) return "IMPORT_BLOCKED"
         val saved=journal.find(id)!!; check(saved.state=="EVIDENCE_STORED")
         val request=saved.request; val identity=request.json["identity"]; val role=identity["role"].asText()
         val context=mapper.readTree(action(id)!!["context"].asText())
@@ -173,6 +198,11 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         db.read(::guard)
         evidence.check(request,saved.evidence!!)
         val n=mapper.readTree(saved.evidence); val exit=n["receipt"]["exit_code"].asInt()
+        if(!engine.fixtureCli && role!="TESTS" && !CodexAttestation.providerTurn(decoded(n,"events.log").toString(Charsets.UTF_8))) {
+            blockImport(id)
+            db.write { c -> engine.hold(c,w.id,"CODEX_NOT_ATTESTED") }
+            return "CODEX_NOT_ATTESTED"
+        }
         val input=if(role!="CODING") FrozenCandidate.reopen(Path.of(context["inputDirectory"].asText()),identity["manifestSha256"].asText()) else null
         if(input!=null) check(input.candidateId==identity["candidateId"].asText() && input.binding.candidateTree==identity["sourceTree"].asText() && input.binding.codingSessionId==identity["codingSessionId"].asText())
         val session=if(role=="TESTS") input!!.binding.codingSessionId else remoteSession(n)
@@ -280,6 +310,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         private fun schema(db: RuntimeDatabase) { db.write { c ->
             c.mutate("CREATE TABLE IF NOT EXISTS remote_workflow_sites(workflow_id TEXT PRIMARY KEY REFERENCES workflows(workflow_id),peer TEXT NOT NULL)")
             c.mutate("CREATE TABLE IF NOT EXISTS remote_workflow_actions(attempt_id TEXT PRIMARY KEY REFERENCES remote_attempts(attempt_id),context TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('AWAITING','IMPORTED')),owner_digest TEXT)")
+            c.mutate("CREATE TABLE IF NOT EXISTS remote_import_blocks(attempt_id TEXT PRIMARY KEY, reason TEXT NOT NULL)")
             c.mutate("CREATE TRIGGER IF NOT EXISTS remote_site_immutable BEFORE UPDATE ON remote_workflow_sites BEGIN SELECT RAISE(ABORT,'immutable execution site'); END")
             c.mutate("CREATE TRIGGER IF NOT EXISTS remote_site_no_delete BEFORE DELETE ON remote_workflow_sites BEGIN SELECT RAISE(ABORT,'immutable execution site'); END")
             c.mutate("CREATE TRIGGER IF NOT EXISTS remote_action_inputs_immutable BEFORE UPDATE ON remote_workflow_actions WHEN NEW.attempt_id!=OLD.attempt_id OR NEW.context!=OLD.context OR OLD.state='IMPORTED' BEGIN SELECT RAISE(ABORT,'immutable remote action'); END")

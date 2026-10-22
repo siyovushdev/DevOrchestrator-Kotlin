@@ -40,7 +40,7 @@ class NativeCodexCliPreflightTest {
         if [ "$1" = "--version" ]; then
           printf 'codex-cli 0.999.0\n'
         elif [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-          printf '%s\n' '${if (validHelp) "--sandbox --model --json --output-last-message --config" else "--model --json"}'
+          printf '%s\n' '${if (validHelp) "--ignore-user-config --ignore-rules --strict-config --sandbox --model --json --output-last-message --config" else "--model --json"}'
         else
           exit 9
         fi

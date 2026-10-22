@@ -49,7 +49,7 @@ from pathlib import Path
 if sys.argv[1:] == ['--version']:
     print('fake-codex test'); sys.exit(0)
 if sys.argv[1:] == ['exec','--help']:
-    print('--sandbox --model --json --output-last-message --config'); sys.exit(0)
+    print('--ignore-user-config --ignore-rules --strict-config --sandbox --model --json --output-last-message --config'); sys.exit(0)
 assert sys.argv[1]=='exec'
 assert not any(k in os.environ for k in ['DEVORCH_PERSONAL_TOKEN','DEVORCH_FETCH_TOKEN','DEVORCH_PUBLISH_TOKEN','GH_TOKEN','GITHUB_TOKEN','SSH_AUTH_SOCK'])
 prompt=sys.stdin.read()
@@ -120,7 +120,7 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
             }
             Files.writeString(artifacts.resolve("events.log"),git(temp,*args.toTypedArray()))
             ProcessObservation(AttemptState.SUCCEEDED,"EXITED_WITH_CLEANUP",null)
-        },{ i,checkout,_ -> git(checkout,"-c","protocol.file.allow=always","fetch","--no-tags",bare.toString(),i.baseSha); Unit })
+        },{ i,checkout,_ -> git(checkout,"-c","protocol.file.allow=always","fetch","--no-tags",bare.toString(),i.baseSha); Unit }, fixtureCli=true)
     }
     private fun service(records: List<GitHubIssueRecord>)=PersonalService(root.resolve("service.db"),object: ServiceGitHub {
         override fun issues()=records

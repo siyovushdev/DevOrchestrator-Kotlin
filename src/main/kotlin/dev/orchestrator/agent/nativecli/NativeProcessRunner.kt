@@ -39,7 +39,8 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
             val builder = ProcessBuilder(python.toRealPath().toString(),"-I","-S",helper.toString(),config.toString())
                 .directory(artifacts.toFile()).redirectErrorStream(true)
             builder.environment().clear()
-            builder.environment().putAll(mapOf("HOME" to artifacts.toString(),"PATH" to "/usr/bin:/bin","LANG" to "C"))
+            builder.environment().putAll(mapOf("HOME" to artifacts.toString(),"PATH" to "/usr/bin:/bin","LANG" to "C",
+                "DEVORCH_DIE_WITH_PARENT" to "1"))
             // Publisher credentials travel in process memory/env, never launch.json/logs.
             require(privateEnvironment.keys.all { it == "DEVORCH_PUBLISH_TOKEN" })
             builder.environment().putAll(privateEnvironment)

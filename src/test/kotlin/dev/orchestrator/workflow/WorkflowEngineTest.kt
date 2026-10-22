@@ -30,7 +30,7 @@ class WorkflowEngineTest {
     private val db get() = RuntimeDatabase(database)
     private fun engine(minimum: Int = 3, limit: Int = 2, timeoutMs: Long = 3000, ceiling: Int? = null) =
         WorkflowEngine(database,repo,binary,home,artifacts,snapshots,minimum,limit,Duration.ofMillis(timeoutMs),
-            ownerCorrectionCeiling={ ceiling ?: limit })
+            ownerCorrectionCeiling={ ceiling ?: limit }, fixtureCli=true)
     private fun git(vararg args: String): String {
         val builder = ProcessBuilder(listOf("/usr/bin/git","-c","core.hooksPath=/dev/null")+args)
             .directory(clone.toFile()).redirectErrorStream(true)
@@ -106,7 +106,7 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
 """)
         check(binary.toFile().setExecutable(true))
         assertNotNull(journal.plan(repo,1,0,"coding-0",clone,git("rev-parse","HEAD^{tree}")))
-        val result = NativeCodingRunner(database,repo,binary,home,artifacts,timeout=Duration.ofSeconds(3)).run("coding-0")
+        val result = NativeCodingRunner(database,repo,binary,home,artifacts,timeout=Duration.ofSeconds(3),fixtureCli=true).run("coding-0")
         assertEquals(AttemptState.SUCCEEDED,result.state,result.reason)
     }
     private fun py(value: String): String = com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(value)
@@ -241,11 +241,12 @@ ${testAttacks.prependIndent("  ")}
         assertEquals(0,launches("review"))
     }
 
-    @Test fun timeoutIsUnknownAndCannotConsumeCorrectionBudgetOrLaunchAgain() {
+    @Test fun timeoutEndsTheStageWithoutAnotherLaunchOrAHeldClaim() {
         setup(tests="import time\ntime.sleep(10)\n"+suite)
-        assertEquals("UNKNOWN",engine(timeoutMs=200).step())
+        assertEquals("STAGE_TIMEOUT",engine(timeoutMs=200).step())
         assertEquals(WorkflowHold.NEEDS_OWNER,workflow().hold)
-        assertEquals(0,workflow().correctionsUsed); assertEquals(1,claims())
+        assertEquals("STAGE_TIMEOUT",workflow().holdReason)
+        assertEquals(0,workflow().correctionsUsed); assertEquals(0,claims())
         assertEquals("NEEDS_OWNER",engine().step())
         assertEquals(1,launches("coding")); assertEquals(0,launches("review"))
     }
@@ -448,7 +449,7 @@ os.execv('/usr/bin/git',['/usr/bin/git']+sys.argv[1:])
 """)
         assertTrue(guarded.toFile().setExecutable(true))
         val guardedEngine = WorkflowEngine(database,repo,binary,home,artifacts,snapshots,3,2,
-            Duration.ofSeconds(3),git=guarded)
+            Duration.ofSeconds(3),git=guarded,fixtureCli=true)
         assertEquals("PASS",guardedEngine.step())
         assertEquals("PASS",guardedEngine.step())
         assertEquals(WorkflowPhase.READY_FOR_PR,workflow().phase)

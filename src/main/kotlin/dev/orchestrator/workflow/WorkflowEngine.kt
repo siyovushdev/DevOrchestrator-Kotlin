@@ -46,6 +46,7 @@ internal class WorkflowEngine(
     private val remote: RemoteExecutionSettings? = null,
     internal val ownerCorrectionCeiling: () -> Int = { correctionLimit },
     internal val stopRequested: () -> Boolean = { false },
+    internal val fixtureCli: Boolean = false,
 ) {
     internal val store = SqliteTaskStore(database)
     internal val db = RuntimeDatabase(database)
@@ -87,7 +88,7 @@ internal class WorkflowEngine(
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
                 remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
-                    proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested).run(intent.attemptId).reason
+                    proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested,fixtureCli=fixtureCli).run(intent.attemptId).reason
             }
             else -> w.phase.name
         }
@@ -157,6 +158,7 @@ internal class WorkflowEngine(
                 db.write { c -> event(c,w.id,"VERIFICATION_PROCESS_STARTED",mapper.writeValueAsString(birth)); ownerGo() }
             }
             if (observed.state==AttemptState.CANCELLED) return stopVerification(w, intent.attemptId)
+            if (observed.evidence?.path("cause")?.asText()=="timeout") return stageTimeout(w, intent.attemptId, "VERIFICATION")
             if (observed.state==AttemptState.UNKNOWN || !pending.isIntact())
                 return verificationUnknown(w,"VERIFICATION_PROCESS_OR_TREE_UNKNOWN")
             // A timeout/interruption/stream error is infrastructure failure, never permission to correct.
@@ -251,6 +253,11 @@ Return only JSON: {"verdict":"PASS or CHANGES_REQUIRED","candidate_id":"${candid
 CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have no findings.
 """.toByteArray()
             check(ownerGo())
+            if (!fixtureCli) {
+                if (!CodexAttestation.nativeBinary(codex.toRealPath()) ||
+                    !LocalSecretCanary.pass(codex.toRealPath(), copy.filesDirectory, home, artifacts, python))
+                    return terminalProbe(w, id, "CODEX_CANARY_FAILED")
+            }
             val observed = NativeProcessRunner(python).run(LinuxIsolation.prefix(copy.filesDirectory,false,home,codex,output)+
                 command.argumentVector.dropLast(1)+listOf("--skip-git-repo-check","-"),
                 copy.filesDirectory,reviewEnvironment(),artifacts,prompt,
@@ -263,6 +270,9 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
                 }
             }
             if (observed.state==AttemptState.CANCELLED) return stopReview(w, id)
+            if (observed.evidence?.path("cause")?.asText()=="timeout") return stageTimeout(w, id, "REVIEW")
+            if (!fixtureCli && !CodexAttestation.providerTurn(boundedFile(artifacts.resolve("events.log"), 1_048_576).toString(Charsets.UTF_8)))
+                return terminalProbe(w, id, "CODEX_NOT_ATTESTED")
             if (observed.state!=AttemptState.SUCCEEDED || !candidate.isIntact() || !copy.isIntact())
                 return reviewUnknown(w,id,"REVIEW_PROCESS_OR_TREE_UNKNOWN")
             val session = session(artifacts.resolve("events.log"))
@@ -528,6 +538,27 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         }
         "CANCELLED"
     } catch (_: Exception) { reviewUnknown(w,id,"REVIEW_CANCEL_NOT_RECORDED") }
+    private fun stageTimeout(w: WorkflowSnapshot, attemptId: String, kind: String): String {
+        db.write { c ->
+            if (kind=="VERIFICATION") c.mutate("""UPDATE workflow_verifications SET state='FAILED',evidence=?
+                WHERE workflow_id=? AND generation=? AND state='STARTING'""",
+                """{"cause":"STAGE_TIMEOUT"}""",w.id,w.correctionsUsed)
+            else c.mutate("UPDATE agent_attempts SET state='FAILED' WHERE attempt_id=? AND state IN ('STARTING','RUNNING')",attemptId)
+            c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",attemptId)
+            hold(c,w.id,"STAGE_TIMEOUT")
+            event(c,w.id,"STAGE_TIMEOUT",kind)
+        }
+        return "STAGE_TIMEOUT"
+    }
+    private fun terminalProbe(w: WorkflowSnapshot, id: String, reason: String): String {
+        db.write { c ->
+            c.mutate("UPDATE agent_attempts SET state='FAILED' WHERE attempt_id=? AND state IN ('STARTING','RUNNING')",id)
+            c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",id)
+            hold(c,w.id,reason)
+            event(c,w.id,reason,id)
+        }
+        return reason
+    }
     private fun verificationUnknown(w: WorkflowSnapshot,reason: String): String {
         db.write { c ->
             c.mutate("UPDATE workflow_verifications SET state='UNKNOWN' WHERE workflow_id=? AND generation=? AND state='STARTING'",w.id,w.correctionsUsed)

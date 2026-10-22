@@ -77,7 +77,7 @@ if sys.argv[1]=='sandbox': sys.exit(0) # fake native policy only; no real Codex 
 if sys.argv[1:] == ['--version']:
     print('fake-codex test'); sys.exit(0)
 if sys.argv[1:] == ['exec','--help']:
-    print('--sandbox --model --json --output-last-message --config'); sys.exit(0)
+    print('--ignore-user-config --ignore-rules --strict-config --sandbox --model --json --output-last-message --config'); sys.exit(0)
 assert sys.argv[1]=='exec'
 assert not any(k in os.environ for k in ['DEVORCH_PERSONAL_TOKEN','DEVORCH_FETCH_TOKEN','DEVORCH_PUBLISH_TOKEN','GH_TOKEN','GITHUB_TOKEN','SSH_AUTH_SOCK'])
 prompt=sys.stdin.read()
@@ -160,7 +160,7 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
             val result=WorkerWireProcess.exchange(listOf("/usr/bin/python3","-I","-S",worker.toString(),"serve",workerConfig.toString()),wire,timeout)
             if(role==loseRole) { loseRole=null; error("fixture lost response after guest completion") }
             responseEdit?.invoke(role,result) ?: result
-        }, { at -> if(at==checkpoint) { checkpoint=null; throw crashed } }))
+        }, { at -> if(at==checkpoint) { checkpoint=null; throw crashed } }), fixtureCli=true)
     }
     private fun service(records: List<GitHubIssueRecord>)=PersonalService(root.resolve("service.db"),object: ServiceGitHub {
         override fun issues()=records

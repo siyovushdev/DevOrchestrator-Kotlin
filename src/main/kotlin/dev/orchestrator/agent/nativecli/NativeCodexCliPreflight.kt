@@ -184,7 +184,8 @@ internal class NativeCodexCliPreflight(
             return CodexProbeResult.Blocked(CodexProbeBlocker.EXEC_PROBE_FAILED)
         }
         val needed = setOf("--sandbox", "--model", "--json",
-            "--output-last-message", "--config")
+            "--output-last-message", "--config",
+            "--ignore-user-config", "--ignore-rules", "--strict-config")
         if (!needed.all { help.output.contains(it) }) {
             return CodexProbeResult.Blocked(CodexProbeBlocker.UNSUPPORTED_CLI_FLAGS)
         }

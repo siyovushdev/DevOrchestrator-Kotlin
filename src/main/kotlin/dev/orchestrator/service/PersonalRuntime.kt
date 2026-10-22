@@ -29,6 +29,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     private val publicationPush: PublicationPush = GitHubBranchPush(token),
     private val fetch: (GitHubIssueRecord,Path,Path) -> Unit = { i,c,a -> fetchPersonalCheckout(token,i,c,a,permitted) },
     private val remoteOverride: RemoteExecutionSettings? = null,
+    private val fixtureCli: Boolean = false,
 ) : TaskRuntime {
     private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { RemoteExecutionSettings(it.peer,SshWorkerTransport(it)) } else null }
     private val repo=SMOKE_TARGET.repositoryId
@@ -44,7 +45,13 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             root(i).resolve("artifacts"),root(i).resolve("snapshots"),config.minimumTests,2,
             Duration.ofSeconds(seconds.toLong()),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote,
             ownerCorrectionCeiling={ limits(i).maxCorrections },
-            stopRequested={ ownerCancelRequested(config.root, i.issueNumber) })
+            stopRequested={ ownerCancelRequested(config.root, i.issueNumber) },
+            fixtureCli=fixtureCli)
+    }
+    private fun terminalOrHeld(w: WorkflowSnapshot): TaskProgress = when (w.holdReason) {
+        "STAGE_TIMEOUT" -> TaskProgress("timed_out", reason=w.holdReason)
+        "CODEX_NOT_ATTESTED", "CODEX_CANARY_FAILED" -> TaskProgress("unattested", reason=w.holdReason)
+        else -> TaskProgress("held", reason=w.holdReason)
     }
     private fun requireSite(i: GitHubIssueRecord) {
         val site=RemoteWorkflowBridge.site(database(i),"issue-${i.githubIssueId}")
@@ -108,6 +115,10 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     }
     override fun cancel(issue: GitHubIssueRecord): TaskProgress {
         val dbFile=database(issue)
+        if (Files.isRegularFile(dbFile)) {
+            LocalProcessControl.stopOrphans(dbFile)
+            if (config.ssh!=null) LocalProcessControl.cancelGuests(dbFile, config.ssh)
+        }
         if (!Files.isRegularFile(dbFile)) return TaskProgress("cancelled", reason="NOT_STARTED")
         val store=SqliteTaskStore(dbFile)
         val w=store.findWorkflow(repo,issue.issueNumber) ?: return TaskProgress("cancelled", reason="NOT_STARTED")
@@ -158,7 +169,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         requireSite(issue)
         val store=SqliteTaskStore(database(issue))
         var w=store.findWorkflow(repo,issue.issueNumber)!!
-        if (w.hold!=WorkflowHold.NONE) return TaskProgress("held",reason=w.holdReason)
+        if (w.hold!=WorkflowHold.NONE) return terminalOrHeld(w)
         if (w.phase==WorkflowPhase.CANCELLED) return TaskProgress("cancelled", reason="OWNER_CANCELLED")
         if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return TaskProgress("done",publisher(issue).publish().url)
         if (w.phase in setOf(WorkflowPhase.READY_FOR_PR,WorkflowPhase.PUBLISHING)) {
@@ -171,7 +182,8 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         engine(issue).step(issue.issueNumber)
         w=store.findWorkflow(repo,issue.issueNumber)!!
         if (w.phase==WorkflowPhase.CANCELLED) return TaskProgress("cancelled", reason="OWNER_CANCELLED")
-        if (w.hold!=WorkflowHold.NONE || w.version==before) return TaskProgress("held",reason=w.holdReason)
+        if (w.hold!=WorkflowHold.NONE) return terminalOrHeld(w)
+        if (w.version==before) return TaskProgress("held",reason=w.holdReason)
         return TaskProgress(when(w.phase) {
             WorkflowPhase.VERIFYING -> "tests"
             WorkflowPhase.REVIEWING,WorkflowPhase.READY_FOR_PR -> "review"

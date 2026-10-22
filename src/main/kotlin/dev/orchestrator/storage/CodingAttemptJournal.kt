@@ -144,8 +144,14 @@ internal class CodingAttemptJournal(database: Path) {
                 return@write false
             }
         } else {
+            val holdReason = when {
+                state==AttemptState.FAILED && receipt.contains("\"reason\":\"timeout") -> "STAGE_TIMEOUT"
+                state==AttemptState.FAILED && receipt.contains("\"reason\":\"CODEX_NOT_ATTESTED\"") -> "CODEX_NOT_ATTESTED"
+                state==AttemptState.FAILED && receipt.contains("\"reason\":\"CODEX_CANARY_FAILED\"") -> "CODEX_CANARY_FAILED"
+                else -> "CODING_RUNNER_${state.name}"
+            }
             c.mutate("""UPDATE workflows SET hold='NEEDS_OWNER',hold_reason=?,version=version+1,updated_at=?
-                WHERE workflow_id=? AND hold!='NEEDS_OWNER'""", "CODING_RUNNER_${state.name}",now,intent.workflowId)
+                WHERE workflow_id=? AND hold!='NEEDS_OWNER'""", holdReason,now,intent.workflowId)
         }
         if (state != AttemptState.UNKNOWN)
             c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",attemptId)

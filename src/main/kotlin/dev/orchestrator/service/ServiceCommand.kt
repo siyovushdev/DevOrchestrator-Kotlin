@@ -1,5 +1,7 @@
 package dev.orchestrator.service
 
+import dev.orchestrator.agent.nativecli.LocalProcessControl
+import java.nio.file.Files
 import java.nio.file.Path
 
 /** Explicit CLI only. Normal bootstrap and CI never start the autonomous worker. */
@@ -14,9 +16,9 @@ internal fun serviceCommand(args: Array<String>) {
 private fun executeServiceCommand(args: Array<String>) {
     val command=args.firstOrNull()
     require((command in setOf("service","run","status","doctor") && args.size==2) ||
-        (command=="cancel" && args.size==3) || (command=="limits" && args.size==6) ||
+        (command in setOf("cancel","release") && args.size==3) || (command=="limits" && args.size==6) ||
         (command in setOf("check-status","check-remote") && args.size==4) || (command in setOf("resume-status","resume-remote") && args.size==5)) {
-        "Usage: service|run|status|doctor CONFIG; cancel CONFIG ISSUE; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
+        "Usage: service|run|status|doctor CONFIG; cancel|release CONFIG ISSUE; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
     }
     val file=Path.of(args[1]); require(file.isAbsolute)
     val config=PersonalConfig.read(file)
@@ -30,7 +32,13 @@ private fun executeServiceCommand(args: Array<String>) {
     if (command=="cancel") {
         val number=args[2].toInt(); require(number>0)
         println(requestOwnerCancel(config.root.resolve("service.db"), config.root, number))
-        println("Отмена записана. Сервис не начнёт новую стадию. Локальный процесс останавливается только после доказательства cleanup. Повтора публикации нет.")
+        stopInFlight(config)
+        println("Отмена записана. Локальный сирота и отдельный SSH-гость получают сигнал остановки. Результат гостя после отмены не импортируется. Повтора публикации нет.")
+        return
+    }
+    if (command=="release") {
+        val number=args[2].toInt(); require(number>0)
+        println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).releaseHeld(number))
         return
     }
     if(args[0]=="status") {
@@ -65,6 +73,7 @@ private fun executeServiceCommand(args: Array<String>) {
         }
         if(config.runtimeMode=="local") dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
         guardedServiceCall(service) { service.recover(); "RECOVERED" }
+        Runtime.getRuntime().addShutdownHook(Thread { try { stopInFlight(config) } catch (_: Exception) {} })
         do {
             val state=guardedServiceCall(service) { service.tick() }
             println("PERSONAL: $state")
@@ -97,6 +106,29 @@ internal fun readLocalServiceStatus(database: Path): String {
         }
         listOf(tasks,failures,describeOwnerControls(database)).filter { it.isNotBlank() }.joinToString("\n")
     }
+}
+
+internal fun stopInFlight(config: PersonalConfig) {
+    if (!Files.isDirectory(config.root)) return
+    val tasks=Files.list(config.root).use { stream ->
+        stream.filter { Files.isDirectory(it) && it.fileName.toString().startsWith("task-") }.toList()
+    }
+    for (dir in tasks) {
+        val database=dir.resolve("run.db")
+        LocalProcessControl.stopOrphans(database)
+        if (config.ssh!=null) LocalProcessControl.cancelGuests(database, config.ssh)
+    }
+}
+
+private fun idleGitHub(): ServiceGitHub = object: ServiceGitHub {
+    override fun issues()=emptyList<dev.orchestrator.storage.GitHubIssueRecord>()
+    override fun authorized(issue: dev.orchestrator.storage.GitHubIssueRecord)=false
+    override fun postStatus(number: Int, body: String)=error("RELEASE_DOES_NOT_POST")
+}
+private fun idleRuntime(): TaskRuntime = object: TaskRuntime {
+    override fun prepare(issue: dev.orchestrator.storage.GitHubIssueRecord)=error("RELEASE_DOES_NOT_RUN")
+    override fun recover(issue: dev.orchestrator.storage.GitHubIssueRecord) {}
+    override fun step(issue: dev.orchestrator.storage.GitHubIssueRecord)=error("RELEASE_DOES_NOT_RUN")
 }
 
 internal fun diagnose(config: PersonalConfig): String {

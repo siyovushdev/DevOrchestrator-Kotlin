@@ -66,9 +66,11 @@ internal class PersonalService(private val file: Path, private val github: Servi
                 state='held',reason=? WHERE issue_id=?""",reason,i.githubIssueId)
         } else c.mutate("UPDATE personal_tasks SET state='held',stage='held',reason=?,resume_state=NULL,resume_reason=NULL WHERE issue_id=?",reason,i.githubIssueId)
     }
+    private val terminalStages=setOf("cancelled","cancel-refused","released","timed_out","unattested")
     fun recover() {
         requireHealthy()
         for(t in tasks()) {
+            if (t.stage in terminalStages) continue
             val pending=db.read { c -> c.rows("SELECT 1 FROM personal_status WHERE issue_id=? AND state!='confirmed'",t.issue.githubIssueId) { 1 }.isNotEmpty() }
             if (pending) {
                 db.write { it.mutate("UPDATE personal_status SET state='uncertain' WHERE issue_id=? AND state='sending'",t.issue.githubIssueId) }
@@ -123,7 +125,8 @@ internal class PersonalService(private val file: Path, private val github: Servi
                 db.write { it.mutate("UPDATE personal_tasks SET state='active',stage='coding' WHERE issue_id=?",i.githubIssueId) }
             } else {
                 val progress=runtime.step(i)
-                if (progress.stage=="cancelled") return applyOwnerCancel(task)
+                if (progress.stage=="cancelled" || progress.reason=="ALREADY_PUBLISHED") return applyOwnerCancel(task)
+                if (progress.stage in setOf("timed_out","unattested")) return finishTerminal(i, progress.stage, progress.reason ?: progress.stage)
                 require(progress.stage in setOf("coding","tests","review","done","held"))
                 if(progress.stage=="done") require(progress.url?.matches(Regex("https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/[1-9][0-9]*"))==true)
                 val summary=if (progress.stage=="done") runtime.summary(i).take(1200) else null
@@ -154,6 +157,9 @@ internal class PersonalService(private val file: Path, private val github: Servi
             }
             "cancelled" -> "Задача отменена владельцем. Новые агенты и публикация не запускаются. Уже отправленные действия GitHub не удаляются и не повторяются."
             "cancel-refused" -> "Отмена не закрывает уже созданный черновик PR: $url . Закрытие PR остаётся решением владельца."
+            "timed_out" -> "Стадия превысила лимит времени и остановлена. Повтора не будет. Следующая задача в очереди может начаться."
+            "unattested" -> "Запуск не подтверждён как настоящий Codex. Повтора не будет. Следующая задача в очереди может начаться."
+            "released" -> "Владелец закрыл застрявшую задачу. Публикация не повторялась. Очередь свободна."
             else -> {
                 val reason=db.read { c -> c.rows("SELECT reason FROM personal_tasks WHERE issue_id=?",i.githubIssueId) { it.getString(1) }.singleOrNull() }
                 when(reason) {
@@ -241,6 +247,27 @@ internal class PersonalService(private val file: Path, private val github: Servi
 
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
 
+    /** Leaves workflow holds and publication rows in place. Does not delete service.db or send PUSH/POST. */
+    fun releaseHeld(number: Int): String {
+        requireHealthy()
+        val task=tasks().singleOrNull { it.issue.issueNumber==number } ?: return "NO_TASK"
+        if (task.state=="done" && task.stage in terminalStages) return "ALREADY_TERMINAL"
+        if (task.state!="held") return "NOT_HELD"
+        db.write { c ->
+            c.mutate("""UPDATE personal_tasks SET state='done',stage='released',reason='OWNER_RELEASED',resume_state=NULL,resume_reason=NULL
+                WHERE issue_id=? AND state='held'""", task.issue.githubIssueId)
+            c.mutate("INSERT INTO owner_audit(recorded_at,actor,action,scope,detail) VALUES(?,?,?,?,?)",
+                Instant.now().toString(),"owner:local-command","RELEASE","issue:$number","queue released; no replay")
+        }
+        return "RELEASED"
+    }
+    private fun finishTerminal(i: GitHubIssueRecord, stage: String, reason: String): String {
+        db.write { c -> c.mutate("""UPDATE personal_tasks SET state='done',stage=?,reason=?,resume_state=NULL,resume_reason=NULL WHERE issue_id=?""",
+            stage, reason, i.githubIssueId) }
+        if (!status(i, stage, null)) return "NEEDS_OWNER"
+        return stage.uppercase()
+    }
+
     private fun noteBlockedCancels(previous: List<Task>) {
         for (t in previous.filter { it.state=="held" && ownerCancelRequested(file.parent, it.issue.issueNumber) }) {
             val state=db.read { c -> c.rows("SELECT state FROM owner_cancels WHERE issue_number=?", t.issue.issueNumber) { it.getString(1) }.singleOrNull() }
@@ -263,9 +290,11 @@ internal class PersonalService(private val file: Path, private val github: Servi
                 return "CANCELLED"
             }
             "ALREADY_PUBLISHED" -> {
-                db.write { c -> c.mutate("UPDATE personal_tasks SET stage='cancel-refused',reason='ALREADY_PUBLISHED' WHERE issue_id=?", i.githubIssueId) }
+                val url=outcome.url ?: task.url
+                db.write { c -> c.mutate("""UPDATE personal_tasks SET state='done',stage='cancel-refused',reason='ALREADY_PUBLISHED',url=?,
+                    resume_state=NULL,resume_reason=NULL WHERE issue_id=?""", url, i.githubIssueId) }
                 recordOwnerCancel(file, i.issueNumber, "blocked", "ALREADY_PUBLISHED")
-                if (!status(i,"cancel-refused",outcome.url ?: task.url)) return "NEEDS_OWNER"
+                if (!status(i,"cancel-refused",url)) return "NEEDS_OWNER"
                 return "ALREADY_PUBLISHED"
             }
             else -> {

@@ -93,7 +93,7 @@ class NativeGitCheckoutSecurityTest {
         Files.writeString(binary, "#!/bin/sh\n" +
             "if [ \"$1\" = \"--version\" ]; then printf 'fake-codex 1\\n'; " +
             "elif [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then " +
-            "printf '%s\\n' '--sandbox --model --json --output-last-message --config'; " +
+            "printf '%s\\n' '--ignore-user-config --ignore-rules --strict-config --sandbox --model --json --output-last-message --config'; " +
             "else exit 33; fi\n")
         assertTrue(binary.toFile().setExecutable(true))
         return binary
