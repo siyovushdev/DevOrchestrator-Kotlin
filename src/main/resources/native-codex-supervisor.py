@@ -78,6 +78,11 @@ def run(config):
     child = subprocess.Popen(config["argv"], cwd=config["cwd"], env=environment,
                              start_new_session=True, preexec_fn=die_with_parent)
     root = identity(child.pid)
+    # Kernel path of the mapped file, read while the child is alive. Not argv[0].
+    try:
+        executed = os.readlink(f"/proc/{child.pid}/exe")
+    except OSError:
+        executed = ""
     root_exit = None
     root_exit_at = None
     reaped = 0
@@ -122,7 +127,7 @@ def run(config):
                 break
         time.sleep(0.01)
     return {"boot_id": boot, "machine_id": machine, "supervisor": me, "child": root,
-            "argv0": config["argv"][0],
+            "executed": executed,
             "exit_code": root_exit, "cleanup_echild": clean, "reaped": reaped,
             "cause": cause or "exited"}
 

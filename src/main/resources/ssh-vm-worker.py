@@ -285,9 +285,11 @@ def native_policy(c, source, attempt, role, supervisor):
     # Exact-file tests, not globs. A read-only profile must also deny source writes.
     probe = source / ('devorch-policy-probe-' + os.urandom(12).hex())
     write(probe, b'public-source-probe')
-    # Do not treat a sandboxed write as success or failure by itself. Codex can
-    # absorb the syscall inside the mount while the host file stays unchanged.
-    # The caller checks the host bytes. Exit 91 here made that profile fail closed.
+    # A mount can report a successful open, write, or unlink that never reaches
+    # the host. Do not SystemExit on that. The caller compares host bytes.
+    request_before = read(attempt / 'request.json', 65536)
+    worker_before = read(INSTALL / 'ssh-vm-worker.py')
+    alias_before = os.path.realpath(alias)
     script = ("from pathlib import Path\n"
               "secret=Path(" + repr(str(canary)) + ")\n"
               "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\n"
@@ -296,10 +298,9 @@ def native_policy(c, source, attempt, role, supervisor):
               " p=Path(text)\n"
               " try: p.open('r+b')\n"
               " except OSError: pass\n"
-              " else: raise SystemExit(92)\n"
               "p=Path(" + repr(str(alias)) + ")\n"
-              "try: p.open('r+b')\nexcept OSError: pass\nelse: raise SystemExit(94)\n"
-              "try: p.unlink()\nexcept OSError: pass\nelse: raise SystemExit(95)\n"
+              "try: p.open('r+b')\nexcept OSError: pass\n"
+              "try: p.unlink()\nexcept OSError: pass\n"
               "p=Path(" + repr(str(probe)) + ")\nassert p.read_bytes()==b'public-source-probe'\n")
     if role == 'CODING':
         script += "p.write_bytes(b'probe'); assert p.read_bytes()==b'probe'; p.write_bytes(b'public-source-probe')\n"
@@ -322,7 +323,10 @@ def native_policy(c, source, attempt, role, supervisor):
         except OSError:
             pass
     write(attempt / 'policy-receipt.json', encoded(raw))
-    if raw.get('exit_code') != 0 or raw.get('cause') != 'exited' or not raw.get('cleanup_echild') or read(probe, 64) != b'public-source-probe' or read(canary, 64) != b'ARTIFICIAL_POLICY_SECRET':
+    host_ok = (read(probe, 64) == b'public-source-probe' and read(canary, 64) == b'ARTIFICIAL_POLICY_SECRET' and
+               read(attempt / 'request.json', 65536) == request_before and read(INSTALL / 'ssh-vm-worker.py') == worker_before and
+               alias.is_symlink() and os.path.realpath(alias) == alias_before)
+    if raw.get('exit_code') != 0 or raw.get('cause') != 'exited' or not raw.get('cleanup_echild') or not host_ok:
         raise ValueError('native permission policy not enforced')
     probe.unlink()
     return overrides
@@ -454,9 +458,8 @@ def execute(c, attempt):
             if p.exists():
                 data = read(p, 1024 * 1024)
                 artifacts[name] = {'data': base64.b64encode(data).decode(), 'sha256': sha(data)}
-        # Path the supervisor actually spawned. Not an elf/size/sha256 attestation.
-        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts,
-                  'codexPath': None if role == 'TESTS' else raw.get('argv0')}
+        # No codex path or hash in this result. The controller reads /proc/pid/exe itself.
+        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts}
         result.update({'version': 1, 'requestSha256': sha(read(attempt / 'request.json')), 'workerSha256': installation_digest(), 'identity': r['identity'], 'started': identity, 'nativePolicyReceipt': load(read(attempt / 'policy-receipt.json')) if role != 'TESTS' else None})
         payload = encoded(result)
         if len(payload) > LIMIT:

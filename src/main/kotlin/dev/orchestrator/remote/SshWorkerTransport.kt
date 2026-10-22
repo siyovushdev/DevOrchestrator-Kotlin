@@ -11,7 +11,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 /** A fixed PERSONAL endpoint. Config never comes from Issue text or model output. */
-internal data class SshWorkerConfig(val identityFile: Path, val knownHosts: Path) {
+internal data class SshWorkerConfig(val identityFile: Path, val knownHosts: Path, val codexBinary: Path? = null) {
     val peer: String get()="vboxuser@127.0.0.1:2222:"+RemoteProtocol.digest(RemoteProtocol.file(knownHosts,65536))+":"+identityFile
     init {
         for(p in listOf(identityFile,knownHosts)) {
@@ -32,6 +32,9 @@ internal class SshWorkerTransport(private val config: SshWorkerConfig): WorkerTr
     companion object {
         const val COMMAND="exec /usr/bin/python3 -I -S /home/vboxuser/.local/lib/devorch-worker/ssh-vm-worker.py serve /home/vboxuser/.config/devorch-worker.json"
     }
+    private val live=java.util.concurrent.atomic.AtomicReference<LiveExecution?>(null)
+    /** Measurement taken from `/proc/pid/exe` during the submit, or null if that process was not seen alive. */
+    fun liveExecution(): LiveExecution?=live.get()
     internal fun arguments(): List<String> = listOf("/usr/bin/ssh","-F","/dev/null","-T","-a","-x",
         "-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","IdentityAgent=none",
         "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile=${config.knownHosts}",
@@ -41,8 +44,30 @@ internal class SshWorkerTransport(private val config: SshWorkerConfig): WorkerTr
         "-o","ServerAliveInterval=5","-o","ServerAliveCountMax=2","-i",config.identityFile.toString(),
         "-p","2222","vboxuser@127.0.0.1",COMMAND)
 
-    override fun exchange(wire: ByteArray, timeoutMs: Long): ByteArray =
-        WorkerWireProcess.exchange(arguments(),wire,timeoutMs)
+    override fun exchange(wire: ByteArray, timeoutMs: Long): ByteArray {
+        val submit=try { RemoteProtocol.mapper.readTree(wire).path("op").asText()=="submit" } catch(_: Exception) { false }
+        val codex=config.codexBinary
+        val observer=if(submit && codex!=null) {
+            live.set(null)
+            try { WorkerWireProcess.start(arguments().dropLast(1)+liveExeCommand(codex)) } catch(_: Exception) { null }
+        } else null
+        val reader=observer?.let { process -> Thread({
+            try {
+                val input=process.inputStream
+                if(readAsciiLine(input)!="MATCH") return@Thread
+                val path=readAsciiLine(input)
+                val measured=measureStream(input)
+                if(path.isNotEmpty()) live.set(LiveExecution(path, measured, true))
+            } catch(_: Exception) { }
+        },"ssh-live-exe").apply { isDaemon=true; start() } }
+        try {
+            return WorkerWireProcess.exchange(arguments(),wire,timeoutMs)
+        } finally {
+            if(observer!=null && observer.isAlive) observer.destroyForcibly()
+            reader?.join(2_000)
+            observer?.waitFor(2,TimeUnit.SECONDS)
+        }
+    }
 
     /** Streams the configured binary and hashes it in this process. The guest does not report the digest. */
     fun measure(codex: Path): MeasuredBinary? {
@@ -66,14 +91,51 @@ internal class SshWorkerTransport(private val config: SshWorkerConfig): WorkerTr
 internal data class MeasuredBinary(val elf: Boolean, val size: Long, val sha256: String)
 
 /**
- * The executed path and the operator path must be the same file. An optional
- * expected sha256 is an operator pin, never a hash compiled into the product.
- * Without that pin, ELF and size are the only checks and any large ELF at that path passes.
+ * Bytes read from `/proc/pid/exe` while that process was alive. `matchesConfigured`
+ * is true only when that mapped file is the operator's codex path. argv0 is not consulted.
+ * Without an operator sha256 pin, ELF and size are the only content checks.
  */
-internal fun codexAttestationOk(executedPath: String, configuredPath: String, measured: MeasuredBinary?, expectedSha256: String?): Boolean =
-    executedPath.isNotEmpty() && executedPath==configuredPath && measured!=null &&
-        measured.elf && measured.size>=1_000_000L && measured.sha256.matches(Regex("[0-9a-f]{64}")) &&
-        (expectedSha256.isNullOrBlank() || measured.sha256==expectedSha256)
+internal data class LiveExecution(val exePath: String, val measured: MeasuredBinary, val matchesConfigured: Boolean)
+
+internal fun codexAttestationOk(live: LiveExecution?, configuredPath: String, expectedSha256: String?): Boolean =
+    live!=null && live.matchesConfigured && configuredPath.isNotEmpty() &&
+        live.measured.elf && live.measured.size>=1_000_000L && live.measured.sha256.matches(Regex("[0-9a-f]{64}")) &&
+        (expectedSha256.isNullOrBlank() || live.measured.sha256==expectedSha256)
+
+/** Walk descendants and hash `/proc/pid/exe` of the live process whose file is `configured`. */
+internal fun attestLiveDescendant(rootPid: Long, configured: Path): LiveExecution? {
+    val expected=try { configured.toRealPath() } catch(_: Exception) { return null }
+    val pending=ArrayDeque<Long>()
+    val seen=HashSet<Long>()
+    pending.add(rootPid)
+    while(pending.isNotEmpty()) {
+        val pid=pending.removeFirst()
+        if(!seen.add(pid) || pid<=1) continue
+        procChildren(pid).forEach { pending.add(it) }
+        if(pid==rootPid) continue
+        val live=readProcExe(pid) ?: continue
+        val exe=Path.of(live.first.removeSuffix(" (deleted)"))
+        val real=try { exe.toRealPath() } catch(_: Exception) { continue }
+        if(real==expected) return LiveExecution(live.first, live.second, true)
+    }
+    return null
+}
+
+private fun procChildren(pid: Long): List<Long> = try {
+    Files.readString(Path.of("/proc/$pid/task/$pid/children")).trim().split(Regex("\\s+"))
+        .filter { it.isNotEmpty() }.map { it.toLong() }
+} catch(_: Exception) { emptyList() }
+
+private fun readProcExe(pid: Long): Pair<String, MeasuredBinary>? {
+    val stat=Path.of("/proc/$pid/stat")
+    if(!Files.isRegularFile(stat)) return null
+    val state=try { Files.readString(stat).substringAfterLast(')').trim().split(Regex("\\s+")).firstOrNull() } catch(_: Exception) { null }
+    if(state==null || state=="Z" || state=="X") return null
+    val link=Path.of("/proc/$pid/exe")
+    val path=try { Files.readSymbolicLink(link).toString() } catch(_: Exception) { return null }
+    val measured=try { Files.newInputStream(link).use { measureStream(it) } } catch(_: Exception) { return null }
+    return path to measured
+}
 
 internal fun measureStream(input: InputStream, limit: Long = 512L * 1024 * 1024): MeasuredBinary {
     val digest=MessageDigest.getInstance("SHA-256")
@@ -97,6 +159,79 @@ internal fun measureStream(input: InputStream, limit: Long = 512L * 1024 * 1024)
         header[2]=='L'.code.toByte() && header[3]=='F'.code.toByte()
     val sha=digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
     return MeasuredBinary(elf, size, sha)
+}
+
+private fun readAsciiLine(input: InputStream, limit: Int = 1024): String {
+    val buf=java.io.ByteArrayOutputStream()
+    while(buf.size()<limit) {
+        val b=input.read()
+        if(b<0 || b=='\n'.code) break
+        buf.write(b)
+    }
+    return buf.toString(Charsets.UTF_8)
+}
+
+/**
+ * One SSH session polls /proc until a live descendant of the worker is the configured
+ * binary, then streams `/proc/pid/exe`. It does not run the guest worker and does not
+ * open the path again after the process has gone.
+ */
+internal fun liveExeCommand(codex: Path): String {
+    val text=codex.toString()
+    require(codex.isAbsolute && text.matches(Regex("/[A-Za-z0-9._+/-]{1,400}"))) { "CODEX_PATH" }
+    val script="""
+import os, sys, time
+expect=sys.argv[1]
+def cmdline(pid):
+    try: data=open('/proc/%s/cmdline'%pid,'rb').read()
+    except OSError: return ''
+    return data.replace(b'\x00', b' ').decode('utf-8','replace')
+def kids(pid):
+    try: text=open('/proc/%s/task/%s/children'%(pid,pid)).read().split()
+    except OSError: return []
+    out=[]
+    for item in text:
+        try: child=int(item)
+        except ValueError: continue
+        out.append(child); out.extend(kids(child))
+    return out
+def alive(pid):
+    try: stat=open('/proc/%s/stat'%pid).read()
+    except OSError: return False
+    state=stat.rsplit(')',1)[1].split()[0]
+    return state not in ('Z','X')
+deadline=time.time()+3600
+while time.time()<deadline:
+    roots=[]
+    for name in os.listdir('/proc'):
+        if not name.isdigit(): continue
+        cmd=cmdline(name)
+        if 'ssh-vm-worker.py' in cmd and ' serve ' in cmd and '_execute' not in cmd:
+            roots.append(int(name))
+    for root in roots:
+        for pid in kids(root):
+            if not alive(pid): continue
+            try: path=os.readlink('/proc/%s/exe'%pid)
+            except OSError: continue
+            if path.endswith(' (deleted)'): path=path[:-len(' (deleted)')]
+            try:
+                if os.path.realpath(path)!=os.path.realpath(expect): continue
+            except OSError:
+                continue
+            sys.stdout.buffer.write(b'MATCH\n')
+            sys.stdout.buffer.write(path.encode()+b'\n')
+            with open('/proc/%s/exe'%pid,'rb') as src:
+                while True:
+                    block=src.read(1048576)
+                    if not block: break
+                    sys.stdout.buffer.write(block)
+            sys.stdout.flush()
+            sys.exit(0)
+    time.sleep(0.2)
+sys.exit(2)
+"""
+    val quoted=script.trimIndent().replace("'", "'\"'\"'")
+    return "exec /usr/bin/python3 -I -S -c '$quoted' '$text'"
 }
 
 /** Remote command streams file bytes. It is not the guest worker and it does not print a hash. */

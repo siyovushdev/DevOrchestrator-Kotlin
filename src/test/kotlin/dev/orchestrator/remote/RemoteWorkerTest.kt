@@ -275,14 +275,41 @@ time.sleep(180)
         assertEquals("CANCELLED", client(j, cancelled).reconcile("a1"))
         assertEquals("EVIDENCE_STORED", client(j).submit(request(attempt="a2", workflow="w2")) { true })
     }
+    @Test fun liveExeAttestsTheMappedFileNotArgv0() {
+        val real=temp.resolve("real-sleep")
+        Files.copy(Path.of("/bin/sleep"), real)
+        real.toFile().setExecutable(true)
+        val parent=ProcessBuilder("/usr/bin/python3","-I","-c",
+            "import os,sys,time\npid=os.fork()\nif pid==0:\n os.execv(sys.argv[1], ['not-the-real-path','30'])\ntime.sleep(30)\n",
+            real.toString()).start()
+        try {
+            var live: LiveExecution?=null
+            val deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5)
+            while(System.nanoTime()<deadline && live==null) {
+                live=attestLiveDescendant(parent.pid(), real)
+                if(live==null) Thread.sleep(50)
+            }
+            assertNotNull(live)
+            assertTrue(live.matchesConfigured)
+            assertFalse(live.exePath.contains("not-the-real-path"))
+            val direct=dev.orchestrator.agent.nativecli.CodexAttestation.measure(real)
+            assertEquals(direct!!.sha256, live.measured.sha256)
+            assertNull(attestLiveDescendant(parent.pid(), temp.resolve("does-not-exist")))
+        } finally {
+            ProcessHandle.of(parent.pid()).ifPresent { handle -> handle.descendants().forEach { it.destroyForcibly() } }
+            parent.destroyForcibly()
+        }
+    }
     @Test fun forgedGuestBinaryIsNotControllerMeasurement() {
         setup()
         val r=request()
         val bytes=transport().exchange(wire(r),18000)
         val honest=RemoteProtocol.mapper.readTree(bytes)
         assertFalse(honest.has("codexBinary"))
+        assertFalse(honest.has("codexPath"))
         val binary=Path.of(RemoteProtocol.mapper.readTree(Files.readAllBytes(config))["codex"].asText())
-        assertEquals(binary.toString(), honest.path("codexPath").asText())
+        assertFalse(honest.path("receipt").path("argv0").asText("").isNotEmpty())
+        assertTrue(honest.path("receipt").path("executed").asText("").startsWith("/"))
         RemoteEvidence(scratch).check(r, bytes)
         val forged=honest.deepCopy<ObjectNode>()
         forged.set<ObjectNode>("codexBinary", RemoteProtocol.mapper.readTree(
@@ -297,10 +324,12 @@ time.sleep(180)
         val measured=dev.orchestrator.agent.nativecli.CodexAttestation.measure(elf)
         assertNotNull(measured)
         assertEquals(RemoteProtocol.digest(body), measured.sha256)
-        assertFalse(codexAttestationOk("/other/codex", binary.toString(), measured, null))
-        assertTrue(codexAttestationOk(elf.toString(), elf.toString(), measured, null))
-        assertFalse(codexAttestationOk(elf.toString(), elf.toString(), measured, "ab".repeat(32)))
-        assertTrue(codexAttestationOk(elf.toString(), elf.toString(), measured, measured.sha256))
+        val seen=LiveExecution(elf.toString(), measured, true)
+        assertFalse(codexAttestationOk(seen.copy(matchesConfigured=false), elf.toString(), null))
+        assertTrue(codexAttestationOk(seen, elf.toString(), null))
+        assertFalse(codexAttestationOk(seen, elf.toString(), "ab".repeat(32)))
+        assertTrue(codexAttestationOk(seen, elf.toString(), measured.sha256))
+        assertFalse(codexAttestationOk(null, elf.toString(), null))
         assertFalse(dev.orchestrator.agent.nativecli.CodexAttestation.accepts(measuredScript, null))
         assertTrue(dev.orchestrator.agent.nativecli.CodexAttestation.accepts(measured, null))
         assertFalse(dev.orchestrator.agent.nativecli.CodexAttestation.accepts(measured, "cd".repeat(32)))

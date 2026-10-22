@@ -33,8 +33,8 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
 ) : TaskRuntime {
     private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { ssh ->
         val transport=SshWorkerTransport(ssh)
-        RemoteExecutionSettings(ssh.peer, transport, codexMeasurement={ transport.measure(config.codex) },
-            codexPath=config.codex.toString(), expectedCodexSha256=config.codexSha256)
+        RemoteExecutionSettings(ssh.peer, transport, codexPath=config.codex.toString(),
+            expectedCodexSha256=config.codexSha256, liveExecution={ transport.liveExecution() })
     } else null }
     private val repo=SMOKE_TARGET.repositoryId
     private val mapper=ObjectMapper()

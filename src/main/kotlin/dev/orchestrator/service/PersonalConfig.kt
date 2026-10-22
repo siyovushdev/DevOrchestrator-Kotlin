@@ -47,7 +47,7 @@ internal data class PersonalConfig(
             val port=p.getProperty("proxyPort","10809").toInt(); require(port in 1..65535)
             val poll=p.getProperty("pollSeconds","90").toLong(); require(poll in 60..120)
             val ssh=if(mode=="ssh-vm") dev.orchestrator.remote.SshWorkerConfig(
-                Path.of(requireNotNull(p.getProperty("sshIdentityFile"))),Path.of(requireNotNull(p.getProperty("sshKnownHosts")))) else null
+                Path.of(requireNotNull(p.getProperty("sshIdentityFile"))),Path.of(requireNotNull(p.getProperty("sshKnownHosts"))),binary) else null
             return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode,ssh,pin)
         }
     }

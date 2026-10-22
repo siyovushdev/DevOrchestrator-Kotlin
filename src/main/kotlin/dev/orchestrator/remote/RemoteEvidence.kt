@@ -18,7 +18,7 @@ internal class RemoteEvidence(private val scratchRoot: Path) {
     fun check(request: RemoteRequest, bytes: ByteArray) {
         require(bytes.size<=RemoteProtocol.LIMIT)
         val n=RemoteProtocol.mapper.readTree(bytes); val r=request.json; val i=r["identity"]
-        check(n.isObject && n.fieldNames().asSequence().toSet()==setOf("version","state","requestSha256","workerSha256","identity","started","receipt","outputTree","files","artifacts","nativePolicyReceipt","codexPath"))
+        check(n.isObject && n.fieldNames().asSequence().toSet()==setOf("version","state","requestSha256","workerSha256","identity","started","receipt","outputTree","files","artifacts","nativePolicyReceipt"))
         check(n["version"].isInt && n["version"].asInt()==1 && n["state"].asText()=="FINISHED" && n["requestSha256"].asText()==request.sha256 &&
             n["workerSha256"]==r["workerSha256"] && n["identity"]==i)
         val raw=n["receipt"]; val birth=n["started"]
@@ -31,16 +31,14 @@ internal class RemoteEvidence(private val scratchRoot: Path) {
         check(raw["supervisor"]==birth["supervisor"] && raw["child"]["pid"]!=raw["supervisor"]["pid"])
         check(raw["reaped"]?.isIntegralNumber==true && raw["reaped"].asLong()>=1)
         if(i["role"].asText()!="TESTS") {
-            check(n.has("codexBinary")==false) { "GUEST_BINARY_ATTESTATION" }
-            check(n["codexPath"]?.asText()?.matches(Regex("/[A-Za-z0-9._+/-]{1,400}"))==true) { "CODEX_PATH" }
+            check(n.has("codexBinary")==false && n.has("codexPath")==false) { "GUEST_BINARY_ATTESTATION" }
             val policy=n["nativePolicyReceipt"]
             check(policy?.isObject==true && policy["cleanup_echild"]?.asBoolean()==true && policy["exit_code"]?.isInt==true && policy["exit_code"].asInt()==0 && policy["cause"]?.asText()=="exited")
             for(key in listOf("boot_id","machine_id","supervisor")) check(policy[key]==birth[key])
             process(policy["child"])
         } else {
             check(n["nativePolicyReceipt"]?.isNull==true)
-            check(n["codexPath"]?.isNull==true)
-            check(n.has("codexBinary")==false)
+            check(n.has("codexBinary")==false && n.has("codexPath")==false)
         }
         val scratch=Files.createTempDirectory(scratchRoot,"receipt-",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         try {

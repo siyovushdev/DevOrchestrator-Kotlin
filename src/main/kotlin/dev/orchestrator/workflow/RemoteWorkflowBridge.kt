@@ -19,9 +19,9 @@ import java.util.Base64
 /** Owner-controlled endpoint identity, independent of Issue/model content. No controller secrets on wire. */
 internal data class RemoteExecutionSettings(val peer: String,val transport: WorkerTransport,
     val importCheckpoint: (String) -> Unit = {},
-    val codexMeasurement: () -> MeasuredBinary? = { null },
     val codexPath: String = "",
-    val expectedCodexSha256: String? = null)
+    val expectedCodexSha256: String? = null,
+    val liveExecution: () -> LiveExecution? = { null })
 
 /** Phase adapter, not a scheduler. The existing engine still owns phases, corrections and publication. */
 internal class RemoteWorkflowBridge(private val engine: WorkflowEngine,private val settings: RemoteExecutionSettings) {
@@ -216,8 +216,8 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         evidence.check(request,saved.evidence!!)
         val n=mapper.readTree(saved.evidence); val exit=n["receipt"]["exit_code"].asInt()
         if(!engine.fixtureCli && role!="TESTS") {
-            val measured=try { settings.codexMeasurement() } catch(_: Exception) { null }
-            if(!codexAttestationOk(n.path("codexPath").asText(""), settings.codexPath, measured, settings.expectedCodexSha256)) {
+            val live=try { settings.liveExecution() } catch(_: Exception) { null }
+            if(!codexAttestationOk(live, settings.codexPath, settings.expectedCodexSha256)) {
                 blockImport(id)
                 db.write { c -> engine.hold(c,w.id,"CODEX_NOT_ATTESTED") }
                 return "CODEX_NOT_ATTESTED"
