@@ -105,10 +105,8 @@ internal class DraftPrPublisher(
             check(journal.confirm(plan.workflowId,EffectKind.DRAFT_PR,api.drafts(plan)))
             check(journal.finish(plan))
             return PublicationResult("DRAFT_PR_CREATED",confirmedUrl(plan.workflowId))
-        } catch (failure: Exception) {
+        } catch (_: Exception) {
             if (active!=null) journal.uncertain(w.id,active,"PUBLICATION_OUTCOME_UNCERTAIN")
-            if (System.getProperty("devorch.publication.trace")=="1")
-                return PublicationResult("TRACE:${failure.javaClass.simpleName}:${failure.message?.take(500)?.replace('\n',' ')}")
             return PublicationResult(if (active!=null) "UNCERTAIN_NEEDS_OWNER" else "GUARD_OR_INPUT_DENIED")
         }
     }

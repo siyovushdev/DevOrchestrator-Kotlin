@@ -126,7 +126,6 @@ class CursorCloudExecutorTest {
     }
 
     @Test fun `coding and review are separate sessions and one draft PR is published`() {
-        System.setProperty("devorch.publication.trace", "1")
         val world = world("pass")
         world.runtime.prepare(world.issue)
         var last = TaskProgress("coding")
