@@ -6,6 +6,7 @@ import dev.orchestrator.publish.*
 import dev.orchestrator.storage.*
 import dev.orchestrator.workflow.*
 import dev.orchestrator.remote.*
+import com.fasterxml.jackson.databind.ObjectMapper
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
@@ -15,6 +16,8 @@ internal interface TaskRuntime {
     fun prepare(issue: GitHubIssueRecord)
     fun recover(issue: GitHubIssueRecord)
     fun step(issue: GitHubIssueRecord): TaskProgress
+    fun cancel(issue: GitHubIssueRecord): TaskProgress = TaskProgress("cancelled", reason="NOT_STARTED")
+    fun summary(issue: GitHubIssueRecord): String = ""
     fun checkRemote(issue: GitHubIssueRecord,id: String): String = error("REMOTE_DISABLED")
     fun resumeRemote(issue: GitHubIssueRecord,id: String,digest: String): TaskProgress? = null
 }
@@ -29,11 +32,20 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
 ) : TaskRuntime {
     private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { RemoteExecutionSettings(it.peer,SshWorkerTransport(it)) } else null }
     private val repo=SMOKE_TARGET.repositoryId
+    private val mapper=ObjectMapper()
     private fun root(i: GitHubIssueRecord)=config.root.resolve("task-${i.githubIssueId}")
     private fun database(i: GitHubIssueRecord)=root(i).resolve("run.db")
-    private fun engine(i: GitHubIssueRecord)=WorkflowEngine(database(i),repo,config.codex,config.home,
-        root(i).resolve("artifacts"),root(i).resolve("snapshots"),config.minimumTests,2,
-        Duration.ofSeconds(120),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote)
+    private fun serviceDb()=config.root.resolve("service.db")
+    private fun limits(i: GitHubIssueRecord)=readExecutionLimits(serviceDb(), i.issueNumber)
+    private fun engine(i: GitHubIssueRecord): WorkflowEngine {
+        val phase=if (Files.isRegularFile(database(i))) SqliteTaskStore(database(i)).findWorkflow(repo,i.issueNumber)?.phase else null
+        val seconds=if (phase==WorkflowPhase.REVIEWING) limits(i).reviewTimeoutSeconds else limits(i).codingTimeoutSeconds
+        return WorkflowEngine(database(i),repo,config.codex,config.home,
+            root(i).resolve("artifacts"),root(i).resolve("snapshots"),config.minimumTests,2,
+            Duration.ofSeconds(seconds.toLong()),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote,
+            ownerCorrectionCeiling={ limits(i).maxCorrections },
+            stopRequested={ ownerCancelRequested(config.root, i.issueNumber) })
+    }
     private fun requireSite(i: GitHubIssueRecord) {
         val site=RemoteWorkflowBridge.site(database(i),"issue-${i.githubIssueId}")
         check(if(remote==null) site==null else site==remote!!.peer) { "EXECUTION_SITE_CHANGED" }
@@ -94,12 +106,60 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         engine(issue).recover(issue.issueNumber)
         publisher(issue).recover()
     }
+    override fun cancel(issue: GitHubIssueRecord): TaskProgress {
+        val dbFile=database(issue)
+        if (!Files.isRegularFile(dbFile)) return TaskProgress("cancelled", reason="NOT_STARTED")
+        val store=SqliteTaskStore(dbFile)
+        val w=store.findWorkflow(repo,issue.issueNumber) ?: return TaskProgress("cancelled", reason="NOT_STARTED")
+        if (w.phase==WorkflowPhase.CANCELLED) return TaskProgress("cancelled", reason="OWNER_CANCELLED")
+        if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return TaskProgress("done", publisher(issue).publish().url, "ALREADY_PUBLISHED")
+        if (w.hold!=WorkflowHold.NONE) return TaskProgress("held", reason=w.holdReason ?: "CANCEL_UNKNOWN")
+        val taskDb=RuntimeDatabase(dbFile)
+        val blocked=w.phase==WorkflowPhase.PUBLISHING || taskDb.read { c ->
+            c.rows("SELECT 1 FROM effects_outbox WHERE workflow_id=? AND state IN ('SENDING','UNCERTAIN')",w.id) { 1 }.isNotEmpty() ||
+                c.rows("SELECT 1 FROM agent_attempts WHERE workflow_id=? AND state IN ('STARTING','RUNNING')",w.id) { 1 }.isNotEmpty() ||
+                c.rows("SELECT 1 FROM workflow_verifications WHERE workflow_id=? AND state='STARTING'",w.id) { 1 }.isNotEmpty()
+        }
+        if (blocked) return TaskProgress("held", reason="EFFECT_OR_PROCESS_UNCONFIRMED")
+        val changed=taskDb.write { c ->
+            val planned=c.rows("SELECT attempt_id FROM agent_attempts WHERE workflow_id=? AND state='PLANNED'",w.id) { it.getString(1) }
+            for (id in planned) {
+                if (c.mutate("UPDATE agent_attempts SET state='CANCELLED' WHERE attempt_id=? AND state='PLANNED'",id)==1)
+                    c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",id)
+            }
+            c.mutate("""UPDATE workflows SET phase='CANCELLED',hold='NONE',hold_reason='OWNER_CANCELLED',version=version+1,updated_at=?
+                WHERE workflow_id=? AND version=? AND hold='NONE' AND phase NOT IN ('DRAFT_PR_CREATED','PUBLISHING','CANCELLED')""",
+                java.time.Instant.now().toString(),w.id,w.version)==1
+        }
+        return if (changed) TaskProgress("cancelled", reason="OWNER_CANCELLED") else TaskProgress("held", reason="CANCEL_UNKNOWN")
+    }
+    override fun summary(issue: GitHubIssueRecord): String = try {
+        val dbFile=database(issue)
+        if (!Files.isRegularFile(dbFile)) "" else {
+            val w=SqliteTaskStore(dbFile).findWorkflow(repo,issue.issueNumber)
+            if (w==null) "" else {
+                val taskDb=RuntimeDatabase(dbFile)
+                val evidence=taskDb.read { c -> c.rows("""SELECT evidence FROM workflow_verifications
+                    WHERE workflow_id=? AND generation=? AND evidence IS NOT NULL""",w.id,w.correctionsUsed) { it.getString(1) }.singleOrNull() }
+                val node=evidence?.let { mapper.readTree(it) }
+                val review=taskDb.read { c -> c.rows("""SELECT detail FROM workflow_events WHERE workflow_id=? AND event_type='REVIEW_COMPLETED'
+                    ORDER BY event_id DESC LIMIT 1""",w.id) { it.getString(1) }.singleOrNull() }?.let { mapper.readTree(it) }
+                formatOwnerReport(node?.path("testsRun")?.takeIf { !it.isMissingNode }?.asInt(),
+                    node?.path("failures")?.takeIf { !it.isMissingNode }?.asInt(),
+                    node?.path("errors")?.takeIf { !it.isMissingNode }?.asInt(),
+                    review?.path("receipt")?.path("verdict")?.asText()?.takeIf { it.isNotBlank() },
+                    review?.path("findings")?.mapNotNull { it.takeIf { n -> n.isTextual }?.asText() } ?: emptyList())
+            }
+        }
+    } catch (_: Exception) { "Отчёт: сохранённые итоги не прочитаны. Сырые логи не публикуются." }
     override fun step(issue: GitHubIssueRecord): TaskProgress {
         check(permitted(issue))
+        if (ownerCancelRequested(config.root, issue.issueNumber)) return cancel(issue)
         requireSite(issue)
         val store=SqliteTaskStore(database(issue))
         var w=store.findWorkflow(repo,issue.issueNumber)!!
         if (w.hold!=WorkflowHold.NONE) return TaskProgress("held",reason=w.holdReason)
+        if (w.phase==WorkflowPhase.CANCELLED) return TaskProgress("cancelled", reason="OWNER_CANCELLED")
         if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return TaskProgress("done",publisher(issue).publish().url)
         if (w.phase in setOf(WorkflowPhase.READY_FOR_PR,WorkflowPhase.PUBLISHING)) {
             val result=publisher(issue).publish()
@@ -110,6 +170,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         check(permitted(issue))
         engine(issue).step(issue.issueNumber)
         w=store.findWorkflow(repo,issue.issueNumber)!!
+        if (w.phase==WorkflowPhase.CANCELLED) return TaskProgress("cancelled", reason="OWNER_CANCELLED")
         if (w.hold!=WorkflowHold.NONE || w.version==before) return TaskProgress("held",reason=w.holdReason)
         return TaskProgress(when(w.phase) {
             WorkflowPhase.VERIFYING -> "tests"

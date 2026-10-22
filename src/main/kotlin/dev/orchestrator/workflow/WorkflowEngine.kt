@@ -44,6 +44,8 @@ internal class WorkflowEngine(
     private val proxyPort: Int = 10809,
     internal val ownerGo: () -> Boolean = { true },
     private val remote: RemoteExecutionSettings? = null,
+    internal val ownerCorrectionCeiling: () -> Int = { correctionLimit },
+    internal val stopRequested: () -> Boolean = { false },
 ) {
     internal val store = SqliteTaskStore(database)
     internal val db = RuntimeDatabase(database)
@@ -64,10 +66,17 @@ internal class WorkflowEngine(
         val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
         requireExecutionSite(w.id)
         if (w.hold!=WorkflowHold.NONE || !ownerGo()) return "NEEDS_OWNER"
+        if (stopRequested()) return cancelIfQuiet(issueNumber)
         return when (w.phase) {
             WorkflowPhase.VERIFYING -> verifyCompletedCoding(issueNumber)
             WorkflowPhase.REVIEWING -> launchReview(issueNumber)
             WorkflowPhase.QUEUED -> {
+                val capped = db.read { c -> c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",
+                    w.id,w.correctionsUsed) { it.getInt(1) }.singleOrNull() }?.let { minOf(it, ownerCorrectionCeiling().coerceIn(0,2)) }
+                if (capped != null && w.correctionsUsed >= capped) {
+                    db.write { c -> if (current(c, w, WorkflowPhase.QUEUED)) hold(c, w.id, "CORRECTION_LIMIT") }
+                    return "CORRECTION_LIMIT"
+                }
                 val prior = latestCoding(w.id) ?: return "NO_COMPLETED_CODING"
                 val request = db.read { c -> c.rows("SELECT source_tree FROM correction_requests WHERE workflow_id=? AND generation=?",
                     w.id,w.correctionsUsed) { it.getString(1) }.singleOrNull() } ?: return "NO_CORRECTION"
@@ -78,7 +87,7 @@ internal class WorkflowEngine(
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
                 remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
-                    proxyPort=proxyPort,ownerGo=ownerGo).run(intent.attemptId).reason
+                    proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested).run(intent.attemptId).reason
             }
             else -> w.phase.name
         }
@@ -144,9 +153,10 @@ internal class WorkflowEngine(
             val harnessSha256 = sha256(boundedFile(script,65536))
             check(ownerGo())
             val observed = NativeProcessRunner(python).run(command,pending.filesDirectory,environment,
-                artifacts,byteArrayOf(),timeout.toMillis(),namespaceCleanup=true) { birth ->
+                artifacts,byteArrayOf(),timeout.toMillis(),namespaceCleanup=true,stopRequested=stopRequested) { birth ->
                 db.write { c -> event(c,w.id,"VERIFICATION_PROCESS_STARTED",mapper.writeValueAsString(birth)); ownerGo() }
             }
+            if (observed.state==AttemptState.CANCELLED) return stopVerification(w, intent.attemptId)
             if (observed.state==AttemptState.UNKNOWN || !pending.isIntact())
                 return verificationUnknown(w,"VERIFICATION_PROCESS_OR_TREE_UNKNOWN")
             // A timeout/interruption/stream error is infrastructure failure, never permission to correct.
@@ -244,7 +254,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
             val observed = NativeProcessRunner(python).run(LinuxIsolation.prefix(copy.filesDirectory,false,home,codex,output)+
                 command.argumentVector.dropLast(1)+listOf("--skip-git-repo-check","-"),
                 copy.filesDirectory,reviewEnvironment(),artifacts,prompt,
-                minOf(timeout.toMillis(),assigned.profile.timeoutSeconds*1000L),last) { birth ->
+                minOf(timeout.toMillis(),assigned.profile.timeoutSeconds*1000L),last,stopRequested=stopRequested) { birth ->
                 db.write { c ->
                     if (!ownerGo() || !currentAfterAction(c,w,WorkflowPhase.REVIEWING) || !policyCurrent(c,policy.version) ||
                         catalog.findAssignedProfile(c,repositoryId,AgentRole.REVIEW)!=assigned) return@write false
@@ -252,6 +262,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
                     event(c,w.id,"REVIEW_PROCESS_STARTED",mapper.writeValueAsString(birth)); true
                 }
             }
+            if (observed.state==AttemptState.CANCELLED) return stopReview(w, id)
             if (observed.state!=AttemptState.SUCCEEDED || !candidate.isIntact() || !copy.isIntact())
                 return reviewUnknown(w,id,"REVIEW_PROCESS_OR_TREE_UNKNOWN")
             val session = session(artifacts.resolve("events.log"))
@@ -445,7 +456,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
             JOIN workflows w ON w.workflow_id=a.workflow_id JOIN projects p ON p.repository_id=w.repository_id""") {
             val scope = try { Path.of(it.getString(4)).toRealPath() } catch (_: Exception) { return@rows true }
             val overlaps = it.getLong(3)==repositoryId || scope.startsWith(root) || root.startsWith(scope)
-            overlaps && (it.getString(2)!=workflow || it.getString(5) !in setOf("SUCCEEDED","FAILED"))
+            overlaps && (it.getString(2)!=workflow || it.getString(5) !in setOf("SUCCEEDED","FAILED","CANCELLED"))
         }.any { it }) return false
         return c.rows("SELECT workspace,repository_id FROM runtime_reservations") {
             val path = try { Path.of(it.getString(1)).toRealPath() } catch (_: Exception) { return@rows true }
@@ -454,9 +465,10 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     }
 
     internal fun correction(c: Connection,w: WorkflowSnapshot,tree: String,feedback: String) {
-        val limit = c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",w.id,w.correctionsUsed) {
+        val stored = c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",w.id,w.correctionsUsed) {
             it.getInt(1)
         }.single()
+        val limit = minOf(stored, ownerCorrectionCeiling().coerceIn(0, 2))
         if (w.correctionsUsed>=limit) { hold(c,w.id,"CORRECTION_LIMIT"); return }
         val bounded = feedback.take(8192)
         c.mutate("INSERT INTO correction_requests(workflow_id,generation,source_tree,feedback) VALUES (?,?,?,?)",
@@ -466,8 +478,56 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     }
 
     internal fun limit(workflow: String,generation: Int): Int = db.read { c ->
-        c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",workflow,generation) { it.getInt(1) }.single()
+        val stored = c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",workflow,generation) { it.getInt(1) }.single()
+        minOf(stored, ownerCorrectionCeiling().coerceIn(0, 2))
     }
+    private fun cancelIfQuiet(issueNumber: Int): String {
+        val w = store.findWorkflow(repositoryId,issueNumber) ?: return "NO_WORKFLOW"
+        if (w.hold!=WorkflowHold.NONE) return "NEEDS_OWNER"
+        if (w.phase==WorkflowPhase.CANCELLED) return "CANCELLED"
+        if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return "ALREADY_PUBLISHED"
+        if (w.phase==WorkflowPhase.PUBLISHING) return "NEEDS_OWNER"
+        val blocked = db.read { c ->
+            c.rows("SELECT 1 FROM effects_outbox WHERE workflow_id=? AND state IN ('SENDING','UNCERTAIN')",w.id) { 1 }.isNotEmpty() ||
+                c.rows("SELECT 1 FROM agent_attempts WHERE workflow_id=? AND state IN ('STARTING','RUNNING')",w.id) { 1 }.isNotEmpty() ||
+                c.rows("SELECT 1 FROM workflow_verifications WHERE workflow_id=? AND state='STARTING'",w.id) { 1 }.isNotEmpty()
+        }
+        if (blocked) return "NEEDS_OWNER"
+        val ok = db.write { c ->
+            val planned = c.rows("SELECT attempt_id FROM agent_attempts WHERE workflow_id=? AND state='PLANNED'",w.id) { it.getString(1) }
+            for (id in planned) {
+                if (c.mutate("UPDATE agent_attempts SET state='CANCELLED' WHERE attempt_id=? AND state='PLANNED'",id)==1)
+                    c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",id)
+            }
+            if (c.mutate("""UPDATE workflows SET phase='CANCELLED',hold='NONE',hold_reason='OWNER_CANCELLED',version=version+1,updated_at=?
+                WHERE workflow_id=? AND version=? AND hold='NONE' AND phase=?""",now(),w.id,w.version,w.phase.name)!=1) return@write false
+            event(c,w.id,"OWNER_CANCELLED",w.phase.name)
+            true
+        }
+        return if (ok) "CANCELLED" else "NEEDS_OWNER"
+    }
+    private fun stopVerification(w: WorkflowSnapshot, attemptId: String): String = try {
+        db.write { c ->
+            check(c.mutate("""UPDATE workflow_verifications SET state='UNKNOWN',evidence=?
+                WHERE workflow_id=? AND generation=? AND state='STARTING'""",
+                """{"cause":"OWNER_STOP"}""",w.id,w.correctionsUsed)==1)
+            c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",attemptId)
+            check(c.mutate("""UPDATE workflows SET phase='CANCELLED',hold='NONE',hold_reason='OWNER_CANCELLED',version=version+1,updated_at=?
+                WHERE workflow_id=? AND phase='VERIFYING' AND hold='NONE'""",now(),w.id)==1)
+            event(c,w.id,"OWNER_CANCELLED","VERIFICATION")
+        }
+        "CANCELLED"
+    } catch (_: Exception) { verificationUnknown(w,"VERIFICATION_CANCEL_NOT_RECORDED") }
+    private fun stopReview(w: WorkflowSnapshot, id: String): String = try {
+        db.write { c ->
+            check(c.mutate("UPDATE agent_attempts SET state='CANCELLED' WHERE attempt_id=? AND state='RUNNING'",id)==1)
+            c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?",id)
+            check(c.mutate("""UPDATE workflows SET phase='CANCELLED',hold='NONE',hold_reason='OWNER_CANCELLED',version=version+1,updated_at=?
+                WHERE workflow_id=? AND phase='REVIEWING' AND hold='NONE'""",now(),w.id)==1)
+            event(c,w.id,"OWNER_CANCELLED","REVIEW")
+        }
+        "CANCELLED"
+    } catch (_: Exception) { reviewUnknown(w,id,"REVIEW_CANCEL_NOT_RECORDED") }
     private fun verificationUnknown(w: WorkflowSnapshot,reason: String): String {
         db.write { c ->
             c.mutate("UPDATE workflow_verifications SET state='UNKNOWN' WHERE workflow_id=? AND generation=? AND state='STARTING'",w.id,w.correctionsUsed)

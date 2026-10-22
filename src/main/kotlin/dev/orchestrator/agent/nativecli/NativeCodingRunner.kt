@@ -42,6 +42,7 @@ internal class NativeCodingRunner(
     private val outputLimit: Int = 1_048_576,
     private val proxyPort: Int = 10809,
     private val ownerGo: () -> Boolean = { true },
+    private val stopRequested: () -> Boolean = { false },
 ) {
     private val databasePath=database.toAbsolutePath().normalize()
     private val store = SqliteTaskStore(database)
@@ -117,8 +118,6 @@ internal class NativeCodingRunner(
         val prompt = ("Implement only the pinned Issue below in this disposable PERSONAL checkout. " +
             "Do not publish, access credentials or change Git metadata. Run its offline tests.\n" +
             "Issue #${intent.issueNumber}: ${issue.title}\n${issue.body}\nCorrection feedback: $feedback\n").toByteArray(Charsets.UTF_8)
-        if (!ownerGo() || !journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
-
         fun complete(state: AttemptState, reason: String, evidence: Any? = null, tree: String? = null): CodingRunResult {
             val receipt = mapper.writeValueAsString(mapOf("attempt_id" to attemptId,"reason" to reason,
                 "artifacts" to artifacts.toString(),"candidate_tree" to tree,"observed" to evidence,
@@ -129,13 +128,17 @@ internal class NativeCodingRunner(
                 "timeout_ms" to limitMs,"output_limit_bytes" to outputLimit,
                 "estimated_budget_micro_usd" to assigned.profile.maxBudgetMicroUsd,"monetary_cap_enforced" to false,
                 "tests" to "NOT_RUN_BY_CONTROLLER","recorded_at" to Instant.now().toString()))
-            val written = journal.completeObserved(attemptId,state,receipt)
+            val written = if (state==AttemptState.CANCELLED) {
+                try { journal.completeObserved(attemptId,state,receipt) } catch (_: Exception) { false }
+            } else journal.completeObserved(attemptId,state,receipt)
             return CodingRunResult(if (written) state else AttemptState.UNKNOWN,
                 if (written) reason else "JOURNAL_STATE_CHANGED",artifacts,tree)
         }
+        if (stopRequested()) return complete(AttemptState.CANCELLED,"OWNER_STOP_BEFORE_START")
+        if (!ownerGo() || !journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
         val observation = NativeProcessRunner(python,outputLimit).run(
             LinuxIsolation.prefix(intent.workspace,true,home,codex,output)+command.argumentVector,intent.workspace,
-            childEnv,artifacts,prompt,limitMs,lastMessage) { birth ->
+            childEnv,artifacts,prompt,limitMs,lastMessage,stopRequested=stopRequested) { birth ->
             ownerGo() && journal.markRunning(attemptId,mapper.writeValueAsString(mapOf("attempt_id" to attemptId,
                 "identity" to birth,"cli_binary" to codex.toRealPath().toString(),
                 "profile_id" to intent.profileId,"profile_version" to intent.profileVersion)))

@@ -28,8 +28,9 @@ class WorkflowEngineTest {
     private val store get() = SqliteTaskStore(database)
     private val journal get() = CodingAttemptJournal(database)
     private val db get() = RuntimeDatabase(database)
-    private fun engine(minimum: Int = 3, limit: Int = 2, timeoutMs: Long = 3000) =
-        WorkflowEngine(database,repo,binary,home,artifacts,snapshots,minimum,limit,Duration.ofMillis(timeoutMs))
+    private fun engine(minimum: Int = 3, limit: Int = 2, timeoutMs: Long = 3000, ceiling: Int? = null) =
+        WorkflowEngine(database,repo,binary,home,artifacts,snapshots,minimum,limit,Duration.ofMillis(timeoutMs),
+            ownerCorrectionCeiling={ ceiling ?: limit })
     private fun git(vararg args: String): String {
         val builder = ProcessBuilder(listOf("/usr/bin/git","-c","core.hooksPath=/dev/null")+args)
             .directory(clone.toFile()).redirectErrorStream(true)
@@ -198,6 +199,19 @@ ${testAttacks.prependIndent("  ")}
         assertEquals("PASS",engine().step()); assertEquals("PASS",engine().step())
         assertEquals(WorkflowPhase.READY_FOR_PR,workflow().phase)
         assertEquals(1,workflow().correctionsUsed)
+    }
+
+    @Test fun ownerCeilingBlocksTheNextCorrectionWithoutRaisingTheStoredCap() {
+        setup(review=changes)
+        assertEquals("PASS", engine().step())
+        assertEquals("CHANGES_REQUIRED", engine(ceiling=0).step())
+        assertEquals(WorkflowHold.NEEDS_OWNER, workflow().hold)
+        assertEquals(0, workflow().correctionsUsed)
+        assertEquals(1, launches("coding"))
+        assertEquals(1, launches("review"))
+        repeat(2) { assertEquals("NEEDS_OWNER", engine(ceiling=2).step()) }
+        assertEquals(1, launches("coding"))
+        assertEquals(1, launches("review"))
     }
 
     @Test fun stricterProjectLimitAndTestContractCannotBeRelaxedAfterRestart() {

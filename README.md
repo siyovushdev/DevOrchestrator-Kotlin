@@ -17,6 +17,7 @@ DevOrchestrator — собственная платформа управлени
 
 - [PRD / ТЗ v1](docs/PRD.md) — **APPROVED**.
 - [Архитектура](docs/ARCHITECTURE.md) — **APPROVED** для Native PERSONAL MVP.
+- [Запуск, отмена, лимиты, диагностика](docs/OPERATOR.md).
 - [Roadmap M0–M6](docs/ROADMAP.md) — **APPROVED**.
 - [Backlog/Issues](docs/BACKLOG.md) — M1 implementation.
 - [Реестр архитектурных решений](docs/DECISIONS.md).

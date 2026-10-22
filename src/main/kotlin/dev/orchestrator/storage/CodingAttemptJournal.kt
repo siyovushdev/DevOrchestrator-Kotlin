@@ -125,16 +125,24 @@ internal class CodingAttemptJournal(database: Path) {
 
     /** Terminal facts + phase/hold + claim release are one transaction. UNKNOWN retains claims. */
     fun completeObserved(attemptId: String, state: AttemptState, receipt: String): Boolean = db.write { c ->
-        require(state in setOf(AttemptState.SUCCEEDED,AttemptState.FAILED,AttemptState.UNKNOWN))
+        require(state in setOf(AttemptState.SUCCEEDED,AttemptState.FAILED,AttemptState.UNKNOWN,AttemptState.CANCELLED))
         require(receipt.length in 1..16_384)
         val intent = read(c,attemptId) ?: return@write false
-        val prior = if (state==AttemptState.UNKNOWN) "'PLANNED','STARTING','RUNNING'" else "'STARTING','RUNNING'"
+        val priorName = c.rows("SELECT state FROM agent_attempts WHERE attempt_id=?",attemptId) { it.getString(1) }.single()
+        val prior = if (state==AttemptState.UNKNOWN || state==AttemptState.CANCELLED)
+            "'PLANNED','STARTING','RUNNING'" else "'STARTING','RUNNING'"
         if (c.mutate("UPDATE agent_attempts SET state=? WHERE attempt_id=? AND state IN ($prior)",
                 state.name,attemptId) != 1) return@write false
         val now = Instant.now().toString()
         if (state == AttemptState.SUCCEEDED) {
             c.mutate("""UPDATE workflows SET phase='VERIFYING',version=version+1,updated_at=?
                 WHERE workflow_id=? AND phase='CODING' AND hold='NONE'""",now,intent.workflowId)
+        } else if (state == AttemptState.CANCELLED) {
+            if (c.mutate("""UPDATE workflows SET phase='CANCELLED',hold='NONE',hold_reason='OWNER_CANCELLED',version=version+1,updated_at=?
+                WHERE workflow_id=? AND phase='CODING' AND hold='NONE'""",now,intent.workflowId) != 1) {
+                c.mutate("UPDATE agent_attempts SET state=? WHERE attempt_id=? AND state='CANCELLED'",priorName,attemptId)
+                return@write false
+            }
         } else {
             c.mutate("""UPDATE workflows SET hold='NEEDS_OWNER',hold_reason=?,version=version+1,updated_at=?
                 WHERE workflow_id=? AND hold!='NEEDS_OWNER'""", "CODING_RUNNER_${state.name}",now,intent.workflowId)

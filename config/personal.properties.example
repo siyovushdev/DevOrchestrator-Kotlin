@@ -14,3 +14,7 @@ model=OWNER_MUST_SELECT
 minimumTests=1
 proxyPort=10809
 pollSeconds=90
+# Per-task ceilings are not stored here. After install:
+#   dev-orchestrator-kotlin limits /absolute/personal.properties default 2 120 120
+#   dev-orchestrator-kotlin cancel /absolute/personal.properties ISSUE
+# Caps stay 0..2 corrections and 1..120 seconds. See docs/OPERATOR.md.

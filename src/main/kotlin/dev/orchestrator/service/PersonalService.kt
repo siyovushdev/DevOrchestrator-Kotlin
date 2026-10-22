@@ -16,9 +16,9 @@ internal class ServiceLock(root: Path) : AutoCloseable {
     override fun close() { lock.release(); channel.close() }
 }
 
-internal class PersonalService(database: Path, private val github: ServiceGitHub,
+internal class PersonalService(private val file: Path, private val github: ServiceGitHub,
     private val runtime: TaskRuntime, private val permitted: () -> Boolean) {
-    private val db=RuntimeDatabase(database)
+    private val db=RuntimeDatabase(file)
     private val mapper=ObjectMapper()
     init { db.write { c ->
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_tasks(
@@ -34,6 +34,8 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         val taskColumns=c.rows("PRAGMA table_info(personal_tasks)") { it.getString("name") }.toSet()
         if ("resume_state" !in taskColumns) c.mutate("ALTER TABLE personal_tasks ADD COLUMN resume_state TEXT")
         if ("resume_reason" !in taskColumns) c.mutate("ALTER TABLE personal_tasks ADD COLUMN resume_reason TEXT")
+        if ("summary" !in taskColumns) c.mutate("ALTER TABLE personal_tasks ADD COLUMN summary TEXT")
+        ensureOwnerSchema(c)
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_reconciliations(
             id INTEGER PRIMARY KEY, issue_id INTEGER NOT NULL, stage TEXT NOT NULL,
             recorded_at TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL)""")
@@ -84,7 +86,13 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
         for (t in previous.filter { it.state in setOf("done","held") }) {
             if (t.reason=="STATUS_OUTCOME_UNKNOWN" || !status(t.issue,t.stage,t.url)) return "NEEDS_OWNER"
         }
+        noteBlockedCancels(previous)
         if(previous.any { it.state=="held" }) return "NEEDS_OWNER"
+        val pendingCancel=previous.firstOrNull {
+            ownerCancelRequested(file.parent, it.issue.issueNumber) && it.state!="held" &&
+                it.stage!="cancelled" && it.stage!="cancel-refused"
+        }
+        if (pendingCancel!=null) return applyOwnerCancel(pendingCancel)
         var task=previous.firstOrNull { it.state!="done" }
         if(task==null) {
             val issues=github.issues()
@@ -100,8 +108,11 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
                     "githubIssueId" to next.githubIssueId,"sourceUpdatedAt" to next.sourceUpdatedAt.toString(),
                     "title" to next.title,"body" to next.body,"baseSha" to next.baseSha))) }
             task=tasks().single { it.issue.githubIssueId==next.githubIssueId }
+            if (ownerCancelRequested(file.parent, task.issue.issueNumber)) return applyOwnerCancel(task)
         }
         val i=task.issue
+        if (ownerCancelRequested(file.parent, i.issueNumber) && task.stage!="cancelled" && task.stage!="cancel-refused")
+            return applyOwnerCancel(task)
         if(!github.authorized(i)) { hold(i,"OWNER_LABEL_OR_ISSUE_CHANGED"); status(i,"held"); return "NEEDS_OWNER" }
         try {
             if(!status(i,task.stage,task.url)) return "NEEDS_OWNER"
@@ -112,10 +123,12 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
                 db.write { it.mutate("UPDATE personal_tasks SET state='active',stage='coding' WHERE issue_id=?",i.githubIssueId) }
             } else {
                 val progress=runtime.step(i)
+                if (progress.stage=="cancelled") return applyOwnerCancel(task)
                 require(progress.stage in setOf("coding","tests","review","done","held"))
                 if(progress.stage=="done") require(progress.url?.matches(Regex("https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/[1-9][0-9]*"))==true)
-                db.write { it.mutate("UPDATE personal_tasks SET state=?,stage=?,url=?,reason=? WHERE issue_id=?",
-                    if(progress.stage in setOf("done","held")) progress.stage else "active",progress.stage,progress.url,progress.reason,i.githubIssueId) }
+                val summary=if (progress.stage=="done") runtime.summary(i).take(1200) else null
+                db.write { it.mutate("UPDATE personal_tasks SET state=?,stage=?,url=?,reason=?,summary=? WHERE issue_id=?",
+                    if(progress.stage in setOf("done","held")) progress.stage else "active",progress.stage,progress.url,progress.reason,summary,i.githubIssueId) }
             }
             val now=tasks().single { it.issue.githubIssueId==i.githubIssueId }
             if (!status(i,now.stage,now.url)) return "NEEDS_OWNER"
@@ -134,19 +147,28 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
             "coding" -> "Работаю над задачей."
             "tests" -> "Проверяю результат тестами."
             "review" -> "Результат проходит независимое ревью. При необходимости исправлю замечания."
-            "done" -> "Готов черновик PR: $url . Слияние выполняет владелец."
+            "done" -> {
+                val summary=db.read { c -> c.rows("SELECT summary FROM personal_tasks WHERE issue_id=?",i.githubIssueId) { it.getString(1) }.singleOrNull() }.orEmpty()
+                val base="Готов черновик PR: $url . Слияние выполняет владелец."
+                if (summary.isBlank()) base else "$base\n$summary"
+            }
+            "cancelled" -> "Задача отменена владельцем. Новые агенты и публикация не запускаются. Уже отправленные действия GitHub не удаляются и не повторяются."
+            "cancel-refused" -> "Отмена не закрывает уже созданный черновик PR: $url . Закрытие PR остаётся решением владельца."
             else -> {
                 val reason=db.read { c -> c.rows("SELECT reason FROM personal_tasks WHERE issue_id=?",i.githubIssueId) { it.getString(1) }.singleOrNull() }
                 when(reason) {
                     "OWNER_LABEL_OR_ISSUE_CHANGED" -> "Остановлено: задача или разрешение изменились. Владельцу нужно сверить согласованное ТЗ и решить, нужна ли новая задача."
                     "STATUS_OUTCOME_UNKNOWN" -> "Остановлено: не удалось подтвердить сообщение в GitHub. Владельцу нужно проверить Issue и сохранённый статус перед продолжением. Повторной отправки не будет."
                     "PREPARATION_INTERRUPTED" -> "Остановлено: подготовка прервана перезапуском. Владельцу нужно проверить сохранённую задачу и завершение старого процесса. Повторного запуска не будет."
+                    "EFFECT_OR_PROCESS_UNCONFIRMED" -> "Отмена запрошена, но процесс или отправка в GitHub ещё не подтверждены. Это не успешная отмена и не повтор. Владельцу нужно сверить сохранённый результат."
+                    "CANCEL_UNKNOWN" -> "Отмена не подтверждена. Автоматического повтора и новой публикации не будет."
                     else -> "Остановлено: результат последнего шага не подтверждён. Владельцу нужно проверить сохранённые тесты, ревью и GitHub PR перед продолжением. Автоматического повтора не будет."
                 }
             }
         }
         // Intent BEFORE POST. Lost response or crash never permits another POST for this stage.
-        val body="DevOrchestrator: $text\n\n<!-- devorch-status:${java.util.UUID.randomUUID()} -->"
+        val marker="\n\n<!-- devorch-status:${java.util.UUID.randomUUID()} -->"
+        val body="DevOrchestrator: ${text.take(2000-marker.length)}"+marker
         db.write { it.mutate("INSERT INTO personal_status(issue_id,stage,state,body) VALUES (?,?,'sending',?)",i.githubIssueId,stage,body) }
         try {
             github.postStatus(i.issueNumber,body)
@@ -218,4 +240,41 @@ internal class PersonalService(database: Path, private val github: ServiceGitHub
     }
 
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
+
+    private fun noteBlockedCancels(previous: List<Task>) {
+        for (t in previous.filter { it.state=="held" && ownerCancelRequested(file.parent, it.issue.issueNumber) }) {
+            val state=db.read { c -> c.rows("SELECT state FROM owner_cancels WHERE issue_number=?", t.issue.issueNumber) { it.getString(1) }.singleOrNull() }
+            if (state==null || state=="requested") recordOwnerCancel(file, t.issue.issueNumber, "blocked", "HELD_NOT_CLEARED")
+        }
+    }
+    private fun applyOwnerCancel(task: Task): String {
+        val i=task.issue
+        if (task.state=="done" && task.stage=="cancelled") {
+            if (!status(i,"cancelled",task.url)) return "NEEDS_OWNER"
+            return "CANCELLED"
+        }
+        val outcome=runtime.cancel(i)
+        when (outcome.reason) {
+            "NOT_STARTED","OWNER_CANCELLED" -> {
+                db.write { c -> c.mutate("""UPDATE personal_tasks SET state='done',stage='cancelled',reason='OWNER_CANCELLED',url=NULL,
+                    resume_state=NULL,resume_reason=NULL WHERE issue_id=?""", i.githubIssueId) }
+                recordOwnerCancel(file, i.issueNumber, "cancelled", outcome.reason)
+                if (!status(i,"cancelled",null)) return "NEEDS_OWNER"
+                return "CANCELLED"
+            }
+            "ALREADY_PUBLISHED" -> {
+                db.write { c -> c.mutate("UPDATE personal_tasks SET stage='cancel-refused',reason='ALREADY_PUBLISHED' WHERE issue_id=?", i.githubIssueId) }
+                recordOwnerCancel(file, i.issueNumber, "blocked", "ALREADY_PUBLISHED")
+                if (!status(i,"cancel-refused",outcome.url ?: task.url)) return "NEEDS_OWNER"
+                return "ALREADY_PUBLISHED"
+            }
+            else -> {
+                val reason=outcome.reason ?: "CANCEL_UNKNOWN"
+                hold(i, reason)
+                recordOwnerCancel(file, i.issueNumber, "unknown", reason)
+                if (!status(i,"held",null)) return "NEEDS_OWNER"
+                return "NEEDS_OWNER"
+            }
+        }
+    }
 }

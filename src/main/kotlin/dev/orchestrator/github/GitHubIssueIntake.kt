@@ -45,6 +45,7 @@ class GitHubIssueIntake(
         // Resolve ALL GitHub pages before writing anything to SQLite.
         val issues = reader.read(target)
         check(issues.all { it.repositoryId == target.repositoryId })
+        store.ensureNoStoredGitHubIdentityCollision(issues)
         var created = 0
         var duplicates = 0
         var needsOwner = 0

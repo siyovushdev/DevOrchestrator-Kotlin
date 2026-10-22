@@ -22,6 +22,7 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
             prompt: ByteArray, limitMs: Long, lastMessage: Path? = null,
             privateEnvironment: Map<String,String> = emptyMap(),
             namespaceCleanup: Boolean = false,
+            stopRequested: () -> Boolean = { false },
             onStarted: (Map<String,String>) -> Boolean): ProcessObservation {
         var interrupted = false
         var process: Process? = null
@@ -78,10 +79,12 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
             val deadline = System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(limitMs+10_000)
             var stopped = false
             var ended = false
+            var ownerStop = false
             while (System.nanoTime()<deadline) {
                 try { if (proc.waitFor(50,TimeUnit.MILLISECONDS)) { ended=true; break } }
                 catch (_: InterruptedException) { interrupted=true; proc.toHandle().destroy(); stopped=true }
                 if (interrupted && stopped) break
+                if (!ownerStop && stopRequested()) { ownerStop=true; proc.toHandle().destroy() }
                 if (lastMessage != null && Files.exists(lastMessage,NOFOLLOW_LINKS) && Files.size(lastMessage)>outputLimit) {
                     oversized.set(true); proc.toHandle().destroy()
                 }
@@ -104,6 +107,7 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
                 observed.path("child").path("start_ticks").asText().isNotEmpty() &&
                 observed.path("exit_code").isInt && proc.exitValue()==0
             if (!clean) return ProcessObservation(AttemptState.UNKNOWN,"CLEANUP_NOT_PROVEN",observed)
+            if (ownerStop) return ProcessObservation(AttemptState.CANCELLED,"OWNER_STOP",observed)
             if (interrupted || oversized.get() || inputFailed.get() || observed["exit_code"].asInt()!=0 ||
                 observed.path("cause").asText()!="exited")
                 return ProcessObservation(AttemptState.FAILED,when {

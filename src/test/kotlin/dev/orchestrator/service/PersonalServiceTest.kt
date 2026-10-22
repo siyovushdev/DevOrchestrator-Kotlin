@@ -175,6 +175,54 @@ class PersonalServiceTest {
         assertEquals(0,prepares)
         records=listOf(issue().copy(repositoryId=10)); assertFails { service().tick() }
     }
+    @Test fun cancelBeforeStartDoesNotPrepareAndLetsTheNextIssueRun() {
+        records=listOf(issue(17),issue(18))
+        requestOwnerCancel(database, database.parent, 17)
+        val s=service()
+        assertEquals("CANCELLED", s.tick())
+        assertEquals(0, prepares); assertEquals(0, steps)
+        assertTrue(posts.single().startsWith("17:")); assertTrue(posts.single().contains("отменена"))
+        assertEquals("ACTIVE", s.tick())
+        assertEquals(1, prepares); assertEquals(0, steps)
+        assertTrue(posts.any { it.startsWith("18:") && it.contains("принята") })
+        assertEquals(1, posts.count { it.startsWith("17:") })
+    }
+    @Test fun cancelOfAcceptedTaskDoesNotStartTheNextStage() {
+        val s=service(); assertEquals("ACTIVE", s.tick()); assertEquals(1, prepares)
+        requestOwnerCancel(database, database.parent, 17)
+        assertEquals("CANCELLED", s.tick())
+        assertEquals(0, steps)
+        assertEquals("IDLE", s.tick())
+        assertEquals(0, steps); assertEquals(1, prepares)
+    }
+    @Test fun cancelDoesNotReplayAPublishedDraft() {
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        progress=TaskProgress("done","https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/7")
+        assertEquals("DONE", s.tick()); assertEquals(1, steps)
+        val runtimeCancel=object: TaskRuntime by runtime {
+            override fun cancel(issue: GitHubIssueRecord)=TaskProgress("done", progress.url, "ALREADY_PUBLISHED")
+        }
+        val cancelling=PersonalService(database, github, runtimeCancel, {enabled})
+        requestOwnerCancel(database, database.parent, 17)
+        val before=posts.size
+        assertEquals("ALREADY_PUBLISHED", cancelling.tick())
+        assertEquals(before+1, posts.size)
+        assertTrue(posts.last().contains("не закрывает"))
+        assertEquals("IDLE", cancelling.tick())
+        assertEquals(before+1, posts.size); assertEquals(1, steps)
+    }
+    @Test fun unconfirmedEffectIsNotReportedAsCancelledAndIsNotRetried() {
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        val runtimeCancel=object: TaskRuntime by runtime {
+            override fun cancel(issue: GitHubIssueRecord)=TaskProgress("held", reason="EFFECT_OR_PROCESS_UNCONFIRMED")
+        }
+        val cancelling=PersonalService(database, github, runtimeCancel, {enabled})
+        requestOwnerCancel(database, database.parent, 17)
+        assertEquals("NEEDS_OWNER", cancelling.tick())
+        assertEquals("NEEDS_OWNER", cancelling.tick())
+        assertEquals(0, steps); assertEquals(1, prepares)
+        assertTrue(posts.any { it.contains("не успешная отмена") })
+    }
     @Test fun singleWorkerLockAndReadOnlyStatusWorkTogether() {
         service()
         ServiceLock(temp).use { assertFails { ServiceLock(temp) }; assertEquals("No tasks",readLocalServiceStatus(database)) }

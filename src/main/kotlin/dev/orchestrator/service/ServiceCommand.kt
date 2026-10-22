@@ -13,12 +13,26 @@ internal fun serviceCommand(args: Array<String>) {
 
 private fun executeServiceCommand(args: Array<String>) {
     val command=args.firstOrNull()
-    require((command in setOf("service","run","status") && args.size==2) ||
+    require((command in setOf("service","run","status","doctor") && args.size==2) ||
+        (command=="cancel" && args.size==3) || (command=="limits" && args.size==6) ||
         (command in setOf("check-status","check-remote") && args.size==4) || (command in setOf("resume-status","resume-remote") && args.size==5)) {
-        "Usage: service|run|status CONFIG; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
+        "Usage: service|run|status|doctor CONFIG; cancel CONFIG ISSUE; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
     }
     val file=Path.of(args[1]); require(file.isAbsolute)
     val config=PersonalConfig.read(file)
+    if (command=="doctor") { println(diagnose(config)); return }
+    if (command=="limits") {
+        val scope=if (args[2]=="default") "default" else "issue:${args[2].toInt().also { require(it>0) }}"
+        println(writeExecutionLimits(config.root.resolve("service.db"), scope,
+            ExecutionLimits(args[3].toInt(), args[4].toInt(), args[5].toInt())))
+        return
+    }
+    if (command=="cancel") {
+        val number=args[2].toInt(); require(number>0)
+        println(requestOwnerCancel(config.root.resolve("service.db"), config.root, number))
+        println("Отмена записана. Сервис не начнёт новую стадию. Локальный процесс останавливается только после доказательства cleanup. Повтора публикации нет.")
+        return
+    }
     if(args[0]=="status") {
         println(readLocalServiceStatus(config.root.resolve("service.db")))
         return
@@ -65,6 +79,10 @@ private fun executeServiceCommand(args: Array<String>) {
 internal fun readLocalServiceStatus(database: Path): String {
     if(!java.nio.file.Files.exists(database)) return "No tasks"
     return java.sql.DriverManager.getConnection("jdbc:sqlite:file:$database?mode=ro").use { c ->
+        fun table(name: String)=c.createStatement().use { statement ->
+            statement.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$name'").use { it.next() }
+        }
+        if (!table("personal_tasks")) return describeOwnerControls(database).ifBlank { "No tasks" }
         val failures=c.createStatement().use { statement ->
             val exists=statement.executeQuery("SELECT 1 FROM sqlite_master WHERE name='personal_failures'").use { it.next() }
             if (exists) statement.executeQuery("SELECT diagnostic FROM personal_failures ORDER BY id").use { r ->
@@ -77,8 +95,23 @@ internal fun readLocalServiceStatus(database: Path): String {
                     "${r.getString(4).orEmpty()} ${r.getString(5).orEmpty()}") }.joinToString("\n").ifEmpty { "No tasks" }
             }
         }
-        listOf(tasks,failures).filter { it.isNotBlank() }.joinToString("\n")
+        listOf(tasks,failures,describeOwnerControls(database)).filter { it.isNotBlank() }.joinToString("\n")
     }
+}
+
+internal fun diagnose(config: PersonalConfig): String {
+    val db=config.root.resolve("service.db")
+    val isolation=try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable(); "available" }
+        catch (_: Exception) { "unavailable" }
+    val codex=if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
+    val tasks=if (java.nio.file.Files.isRegularFile(db)) readLocalServiceStatus(db) else "No service.db"
+    return """enabled=${config.enabled}
+runtime=${config.runtimeMode}
+repository=siyovushdev/devorch-kotlin-e2e-smoke id=1424152600
+isolation=$isolation
+codex=$codex
+lock=${java.nio.file.Files.exists(config.root.resolve("service.lock"))}
+$tasks"""
 }
 
 /** Only explicit GitHub GET availability errors keep polling. Everything else terminates. */
