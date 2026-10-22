@@ -22,7 +22,8 @@
 | M1-03 | Registry + policy evaluator по ADR-001 | M1-02 | Unknown/WORK DENY, project identity scoped |
 | M1-06 | Agent Catalog/Profile schema, roles/models/effort и versioned config (ADR-005) | M1-02,M1-03 | MANUAL profiles меняются без правки workflow; проверка supported capabilities |
 | M1-04 | GitHub intake и dedupe | M1-03 | Реальная Issue импортируется однократно |
-| M1-05 | Read-only status API/event history | M1-02 | Статус доступен без side effects |
+| M1-05 | Internal read-only status API/event history (localhost; not external access) | M1-02 | Side-effect-free core status primitives; no external auth claims |
+| M1-07 | [#13 Versioned API contract](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/13) для Web/Android/CLI | M1-03,M1-05 | OpenAPI `/api/v1`, resources, commands/errors/events, compatibility tests; design only, no public control endpoints |
 
 ## M2 — Agent Runtime (предложения)
 
@@ -52,20 +53,24 @@
 | M4-04 | Второй реальный Agent Adapter + переключение ролей/модели/effort | M4-03,M1-06 | Два реальных адаптера выбираются в разных задачах; immutable profile version на attempt |
 | M4-05 | MANUAL / AUTO_RULES / AUTO_AI task routing и fallback | M4-04 | Политика выбирает поддерживаемый профиль, хранит причину/стоимость; не выдаёт новых прав |
 
-## M5 — Android Monitor (предложения)
+## M5 — Universal API platform (planned Issues, not authorized for implementation)
 
 | Key | Issue | Depends on | Definition of Done |
 |---|---|---|---|
-| M5-01 | Ktor read API/auth + events | M4-03 | Авторизованный read-only доступ |
-| M5-02 | Compose: projects/tasks/status/logs | M5-01 | С телефона видно живую задачу, blocked reason и PR |
-| M5-03 | Уведомления о статусах | M5-02 | Без дубликатов и утечки данных |
+| M5-01 | [#14 Secure Monitoring REST + SSE API](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/14) | M1-07,M4-03 | Authenticated read-only project/task/attempt/review/agent/status/events/health endpoints; redaction, pagination, reconnect, no side effects |
+| M5-02 | [#15 Secure Owner Control API](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/15) | M5-01,M4-03,WorkflowEngine owner guards | Owner approve/reject, pause/resume/cancel, guarded retry/reconcile, policy/profile updates with RBAC, version CAS, idempotency receipts and audit; deny replay |
+| M5-03 | API security and recovery E2E | M5-02 | Remote clients cannot bypass project policy; WORK requires Owner GO; restart and UNKNOWN effects are safe |
 
-## M6 — Android Control (предложения)
+## M6 — Universal dashboard and clients (planned)
 
 | Key | Issue | Depends on | Definition of Done |
 |---|---|---|---|
-| M6-01 | Owner auth + command audit API | M5-03 | Replay/unauthorized rejected |
-| M6-02 | Approve/reject/pause с телефона | M6-01 | Контроль политики независимо от UI |
-| M6-03 | Live Android-to-server acceptance | M6-02 | Одна задача управляется безопасно с телефона |
+| M6-01 | [#16 Web dashboard first](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/16) | M5-03 | Browser shows live queue/status/agent evidence and issues Owner commands exclusively through API, mobile responsive |
+| M6-02 | Optional Android app / CLI client | M6-01 | Same `/api/v1` contract with no duplicate backend logic; no GitHub or agent secrets in clients |
+| M6-03 | Cross-client acceptance | M6-01 | One task observed and safely controlled through documented API, with audit and no bypass |
 
-**Правило:** эти задачи не создаются и не запускаются параллельно. После утверждения M0 уточняем зависимости и открываем только ближайшие готовые задачи реализации.
+**API implementation order:** M1 internal status primitives and versioned contract → M3 first autonomous Draft PR → M4 stable recovery and isolation → M5 secure external read/control API → M6 clients. A thin loopback read-only endpoint may be added earlier, but remote control needs full auth and command gating.
+
+**Explicit exclusions:** arbitrary remote shell, direct DB writes from UI, unsupervised Merge, assigning policy from Issue/agent content, public unauthenticated endpoints.
+
+**Правило:** задачи планируются без параллельного запуска. Выбираем очередную готовую задачу только после зависимостей и отдельного решения о реализации.

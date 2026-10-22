@@ -14,10 +14,10 @@
 ## 2. Предложенная схема
 
 ```text
-ChatGPT / GitHub Issue      Android (M5–M6, позднее)
+ChatGPT / GitHub Issue      Web / Android / CLI (M6)
          |                          |
          v                          v
-   GitHub Adapter               Ktor API
+   GitHub Adapter          Ktor REST/SSE /api/v1
          |                          |
          +------> Workflow Engine <-+
                        |
@@ -52,7 +52,8 @@ ChatGPT / GitHub Issue      Android (M5–M6, позднее)
 | AgentRunner | Запуск/stop/observation bounded процессов через выбранный адаптер и sandbox | Иметь токены публикации или незаметно менять текущий attempt |
 | ReviewDriver | Независимая проверка frozen tree/diff | Доверять саморевью агента |
 | Publisher | Branch, commit, push, Draft PR, durable receipts | Merge или повторять неопределённый эффект вслепую |
-| ApiServer | Read/control endpoints для владельца | Прямой root shell |
+| ApiServer | Версионированный, client-neutral OpenAPI: read snapshots, event stream и авторизованные Owner commands | Прямой root shell, обход PolicyEngine, прямые SQL transitions из HTTP |
+| Web/Android/CLI | Тонкие клиенты одного API, единые команды и права | GitHub/агентные credentials, бизнес-логика переходов и локальные обходы Owner gates |
 
 ## 3A. Подключаемые агенты и маршрутизация задач (утверждённое требование, реализуется по этапам)
 
@@ -112,9 +113,15 @@ Draft PR — **целевой результат автоматизации**. �
 
 По утверждённому ADR-002/R-04 в PERSONAL Draft PR создаётся после обязательного независимого Review PASS без предварительного Chief по умолчанию. Merge — только Owner. WORK использует отдельные строгие Owner gates. Архитектура утверждена в рамках MVP.
 
-## 7. Android (будущие этапы)
+## 7. Универсальный внешний API (M1 contract; M5 runtime; M6 clients)
 
-Kotlin/Compose клиент Ktor API: список проектов/задач, timeline, короткие статусы, разрешения, пауза. Через защищённое соединение (например, Tailscale). Без прямого SSH и без токенов GitHub в приложении. Авторизация и аудит команд обязательны до M6.
+- Kotlin/Ktor — единственный backend и источник истины для браузера, Android, CLI и будущих интеграций. Интерфейсы не управляют агентами напрямую.
+- Версия `/api/v1`, OpenAPI 3. **REST** для snapshots и Owner commands; **SSE** с reconnect cursor для событий. Long polling допустим как fallback, WebSocket не нужен для первого MVP.
+- Read resources: system health/readiness, project registry (redacted), tasks/phase/hold, attempts, review evidence, artifact metadata, agents/capabilities/profiles, GitHub PR references, event timeline и diagnostics; возвращаем UNKNOWN/NOT_TESTED честно.
+- Owner commands: approve/reject, pause/resume/cancel, guarded retry/reconcile, next-attempt agent profile, разрешённая конфигурация проектов. Запрет свободного shell, SQL, произвольного git, автоматического Merge.
+- Security: identity/auth, explicit role and per-project policy, separate WORK execution/publication gates, expectedVersion/CAS, idempotency keys, audit and read-after-write receipts. GET не имеет side effects; redaction and pagination limit leakage.
+- External access requires protected transport (TLS/private network), deny-by-default routing and security E2E after M4; CORS alone does not authorize commands. No credentials in browser/mobile clients besides appropriately scoped user sessions.
+- M1 may implement **local read-only** helpers plus OpenAPI contract without enabling network controls. M5 delivers secure public-facing read/control. M6: responsive Web dashboard first, Android optional on same contract.
 
 ## 8. Что намеренно не проектируем сейчас
 

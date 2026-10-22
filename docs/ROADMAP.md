@@ -5,12 +5,12 @@
 | Этап | Содержание | Проверяемый результат / gate |
 |---|---|---|
 | **M0** | PRD, ADR-001..005, acceptance, backlog, угрозы/разрешения | Владелец утвердил документы и стартовый backlog; реализации нет |
-| **M1** | JVM/Ktor skeleton, SQLite, GitHub intake, Project Registry + Agent Catalog/Profile schema | Реальная Issue принимается один раз; роли и agent profiles валидируются и сохраняются |
+| **M1** | JVM/Ktor skeleton, SQLite, GitHub intake, Project Registry + Agent Catalog/Profile schema, internal status primitives and versioned API contract (design) | Реальная Issue принимается один раз; роли и agent profiles валидируются и сохраняются |
 | **M2** | Минимальный Native Codex CLI Adapter (`codex exec`), изолированный временный PERSONAL worktree, artifacts/exit/cleanup | Реальный `codex exec` запущен из Kotlin и создал проверенный diff; Docker не устанавливается |
 | **M3** | Independent Review, bounded corrections, Git Publisher, Draft PR | Настоящая Issue дошла до **Draft PR** через автоматическую цепочку; Merge нет |
 | **M4** | Persistent service/recovery + второй реальный Agent Adapter и auto routing между разрешёнными ролями/моделями/effort | После restart задачи продолжаются; 2 адаптера и AUTO_RULES/AUTO_AI E2E без смены прав |
-| **M5** | Android Monitor (read-only) | Проекты, статусы, события, блокеры видны с телефона через защищённый API |
-| **M6** | Android Control | Авторизованные Owner approvals/pause, аудит и запрет обхода политики |
+| **M5** | Универсальный защищённый API: REST snapshots + SSE events + Owner commands | Web/Android/CLI одинаково видят проекты, задачи, логи/события и управляют разрешёнными действиями через авторизацию, CAS и аудит |
+| **M6** | Клиенты единого API: Web dashboard первым; Android/CLI по необходимости | Управление с браузера/телефона без прямого SSH, секретов в клиенте и дублирования бизнес-логики |
 
 ## Gate-модель
 
@@ -23,3 +23,7 @@
 ## Отложенные идеи
 
 Многомашинность через Firefly/WORK, GitHub App вместо начального транспорта, MCP-адаптер для ChatGPT и обязательный AI Chief — **не MVP**. **Подключаемый Agent Catalog и динамический выбор поддерживаемых агентов/моделей/effort — часть серверного MVP (M1–M4)**. Произвольные ещё не интегрированные провайдеры не обещаются.
+
+## API в правильной очереди (согласовано для планирования)
+
+M1-07 [#13](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/13) определяет OpenAPI `/api/v1` и модель ресурсов/команд; M5-01 [#14](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/14) реализует защищённое чтение REST+SSE; M5-02 [#15](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/15) — защищённые команды Owner; M6-01 [#16](https://github.com/siyovushdev/DevOrchestrator-Kotlin/issues/16) — Web UI, использующий тот же API, что и Android/CLI. Контроль WORK не включается из-за появления HTTP endpoint: необходимы отдельные Owner gates и audit. Внешняя публикация API только после M4 security/recovery E2E.
