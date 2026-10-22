@@ -18,7 +18,7 @@ internal class RemoteEvidence(private val scratchRoot: Path) {
     fun check(request: RemoteRequest, bytes: ByteArray) {
         require(bytes.size<=RemoteProtocol.LIMIT)
         val n=RemoteProtocol.mapper.readTree(bytes); val r=request.json; val i=r["identity"]
-        check(n.isObject && n.fieldNames().asSequence().toSet()==setOf("version","state","requestSha256","workerSha256","identity","started","receipt","outputTree","files","artifacts","nativePolicyReceipt"))
+        check(n.isObject && n.fieldNames().asSequence().toSet()==setOf("version","state","requestSha256","workerSha256","identity","started","receipt","outputTree","files","artifacts","nativePolicyReceipt","codexBinary"))
         check(n["version"].isInt && n["version"].asInt()==1 && n["state"].asText()=="FINISHED" && n["requestSha256"].asText()==request.sha256 &&
             n["workerSha256"]==r["workerSha256"] && n["identity"]==i)
         val raw=n["receipt"]; val birth=n["started"]
@@ -31,11 +31,17 @@ internal class RemoteEvidence(private val scratchRoot: Path) {
         check(raw["supervisor"]==birth["supervisor"] && raw["child"]["pid"]!=raw["supervisor"]["pid"])
         check(raw["reaped"]?.isIntegralNumber==true && raw["reaped"].asLong()>=1)
         if(i["role"].asText()!="TESTS") {
+            val bin=n["codexBinary"]
+            check(bin?.isObject==true && bin["elf"]?.isBoolean==true && bin["size"]?.isIntegralNumber==true && bin["size"].asLong()>=0 &&
+                bin["sha256"]?.asText()?.matches(Regex("[0-9a-f]{64}"))==true)
             val policy=n["nativePolicyReceipt"]
             check(policy?.isObject==true && policy["cleanup_echild"]?.asBoolean()==true && policy["exit_code"]?.isInt==true && policy["exit_code"].asInt()==0 && policy["cause"]?.asText()=="exited")
             for(key in listOf("boot_id","machine_id","supervisor")) check(policy[key]==birth[key])
             process(policy["child"])
-        } else check(n["nativePolicyReceipt"]?.isNull==true)
+        } else {
+            check(n["nativePolicyReceipt"]?.isNull==true)
+            check(n["codexBinary"]?.isNull==true)
+        }
         val scratch=Files.createTempDirectory(scratchRoot,"receipt-",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         try {
             val image=scratch.resolve("image"); RemoteProtocol.materialize(n["files"],image)

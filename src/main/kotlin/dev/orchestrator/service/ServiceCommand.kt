@@ -38,7 +38,7 @@ private fun executeServiceCommand(args: Array<String>) {
     }
     if (command=="release") {
         val number=args[2].toInt(); require(number>0)
-        println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).releaseHeld(number))
+        println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).releaseHeld(number, config.ssh))
         return
     }
     if(args[0]=="status") {

@@ -1,12 +1,14 @@
 package dev.orchestrator.agent.nativecli
 
 import dev.orchestrator.storage.AttemptState
+import java.nio.file.attribute.PosixFilePermission
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Real supervisor process. No Codex, network, or controller secret. */
@@ -29,6 +31,27 @@ class OwnerStopTest {
         assertEquals(AttemptState.CANCELLED, observed.state)
         assertEquals("OWNER_STOP", observed.reason)
         assertTrue(observed.evidence?.path("cleanup_echild")?.asBoolean() == true)
+    }
+
+    @Test fun consistentWriteBoundaryPassesTheCanaryWithoutFixtureBypass() {
+        val home=Files.createDirectories(temp.resolve("agent-home"))
+        val codexHome=Files.createDirectories(home.resolve(".codex"))
+        val secret=codexHome.resolve("devorch-policy-canary")
+        Files.writeString(secret, LocalSecretCanary.SECRET)
+        Files.setPosixFilePermissions(secret, setOf(PosixFilePermission.OWNER_READ))
+        val workspace=Files.createDirectories(temp.resolve("workspace"))
+        val fake=temp.resolve("sandbox-codex")
+        Files.writeString(fake, """#!/usr/bin/python3
+import os, sys
+cmd=sys.argv[sys.argv.index('--')+1:]
+os.execv(cmd[0], cmd)
+""")
+        fake.toFile().setExecutable(true)
+        assertTrue(LocalSecretCanary.pass(fake, workspace, home, Path.of("/usr/bin/python3"), true))
+        val exit=temp.resolve("exit-codex")
+        Files.writeString(exit, "#!/usr/bin/python3\nimport sys\nsys.exit(0)\n")
+        exit.toFile().setExecutable(true)
+        assertFalse(LocalSecretCanary.pass(exit, workspace, home, Path.of("/usr/bin/python3"), true))
     }
 
     @Test fun supervisorStopsTheChildWhenItsParentExits() {

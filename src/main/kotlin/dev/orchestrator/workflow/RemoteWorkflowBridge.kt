@@ -109,6 +109,13 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
                 c.mutate("INSERT INTO remote_workflow_actions(attempt_id,context,state) VALUES(?,?,'AWAITING')",id,context)
                 engine.bump(c,w.id); engine.event(c,w.id,"REMOTE_ACTION_INTENT",mapper.writeValueAsString(mapOf("attemptId" to id,"requestSha256" to request.sha256,"peer" to settings.peer)))
             }
+            if(state=="TIMEOUT") {
+                db.write { c ->
+                    c.mutate("DELETE FROM runtime_reservations WHERE attempt_id=?", id)
+                    engine.hold(c, w.id, "STAGE_TIMEOUT")
+                }
+                return "STAGE_TIMEOUT"
+            }
             if(state!="EVIDENCE_STORED") { hold(w.id,id); return "REMOTE_UNKNOWN_NEEDS_OWNER" }
             if(engine.stopRequested() || importBlocked(id)) {
                 blockImport(id)
@@ -198,7 +205,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         db.read(::guard)
         evidence.check(request,saved.evidence!!)
         val n=mapper.readTree(saved.evidence); val exit=n["receipt"]["exit_code"].asInt()
-        if(!engine.fixtureCli && role!="TESTS" && !CodexAttestation.providerTurn(decoded(n,"events.log").toString(Charsets.UTF_8))) {
+        if(!engine.fixtureCli && role!="TESTS" && !CodexAttestation.guestBinary(n)) {
             blockImport(id)
             db.write { c -> engine.hold(c,w.id,"CODEX_NOT_ATTESTED") }
             return "CODEX_NOT_ATTESTED"

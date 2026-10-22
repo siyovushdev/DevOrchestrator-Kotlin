@@ -250,6 +250,26 @@ class PersonalServiceTest {
         val released=RuntimeDatabase(database).read { it.rows("SELECT stage FROM personal_tasks WHERE number=17") { it.getString(1) }.single() }
         assertEquals("released", released)
     }
+    @Test fun cancelFlagDoesNotPullReleasedOrTimedOutBackToHeld() {
+        records=listOf(issue(17), issue(18))
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        RuntimeDatabase(database).write { it.mutate("UPDATE personal_tasks SET state='held',reason='PREPARATION_INTERRUPTED'") }
+        requestOwnerCancel(database, database.parent, 17)
+        assertEquals("RELEASED", s.releaseHeld(17))
+        assertEquals("ACTIVE", s.tick())
+        val stage=RuntimeDatabase(database).read { it.rows("SELECT state,stage FROM personal_tasks WHERE number=17") { it.getString(1)+"/"+it.getString(2) }.single() }
+        assertEquals("done/released", stage)
+        assertEquals(2, prepares)
+        val flagged=object: TaskRuntime by runtime {
+            override fun cancel(issue: GitHubIssueRecord)=TaskProgress("timed_out", reason="STAGE_TIMEOUT")
+        }
+        requestOwnerCancel(database, database.parent, 18)
+        val cancelling=PersonalService(database, github, flagged, {enabled})
+        assertEquals("TIMED_OUT", cancelling.tick())
+        assertEquals("IDLE", cancelling.tick())
+        val timed=RuntimeDatabase(database).read { it.rows("SELECT state,stage FROM personal_tasks WHERE number=18") { it.getString(1)+"/"+it.getString(2) }.single() }
+        assertEquals("done/timed_out", timed)
+    }
     @Test fun timeoutEndsThatTaskAndStartsTheNext() {
         records=listOf(issue(17), issue(18))
         val s=service(); assertEquals("ACTIVE", s.tick())
@@ -259,6 +279,28 @@ class PersonalServiceTest {
         assertEquals(2, prepares)
         val stage=RuntimeDatabase(database).read { it.rows("SELECT stage FROM personal_tasks WHERE number=17") { it.getString(1) }.single() }
         assertEquals("timed_out", stage)
+    }
+    @Test fun releaseStopsALiveProcessWithoutDeletingTheDatabase() {
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        RuntimeDatabase(database).write { it.mutate("UPDATE personal_tasks SET state='held',reason='UNRECONCILED_CODING_START'") }
+        val sleep=ProcessBuilder("/bin/sleep","30").start()
+        val stat=java.nio.file.Files.readString(java.nio.file.Path.of("/proc/${sleep.pid()}/stat"))
+        val ticks=stat.substringAfterLast(')').trim().split(Regex("\\s+"))[19]
+        val boot=java.nio.file.Files.readString(java.nio.file.Path.of("/proc/sys/kernel/random/boot_id")).trim()
+        val runDb=temp.resolve("task-1017/run.db")
+        java.nio.file.Files.createDirectories(runDb.parent)
+        val taskDb=dev.orchestrator.storage.RuntimeDatabase(runDb)
+        taskDb.write { c ->
+            c.mutate("INSERT INTO projects(project_id,repository_id,kind,workspace_root) VALUES('p',1,'PERSONAL',?)", temp.toString())
+            c.mutate("INSERT INTO workflows(workflow_id,repository_id,issue_number,phase,hold,version,corrections_used,created_at,updated_at) VALUES('w',1,1,'CODING','NONE',0,0,'t','t')")
+            c.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES('w','CODING_PROCESS_STARTED',?,'t')",
+                """{"pid":"${sleep.pid()}","start_ticks":"$ticks","boot_id":"$boot"}""")
+        }
+        assertEquals("RELEASED", s.releaseHeld(17))
+        assertTrue(sleep.waitFor(3, java.util.concurrent.TimeUnit.SECONDS))
+        assertFalse(sleep.isAlive)
+        assertTrue(java.nio.file.Files.isRegularFile(database))
+        assertTrue(java.nio.file.Files.isRegularFile(runDb))
     }
     @Test fun singleWorkerLockAndReadOnlyStatusWorkTogether() {
         service()

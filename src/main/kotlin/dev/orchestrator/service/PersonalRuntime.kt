@@ -124,7 +124,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         val w=store.findWorkflow(repo,issue.issueNumber) ?: return TaskProgress("cancelled", reason="NOT_STARTED")
         if (w.phase==WorkflowPhase.CANCELLED) return TaskProgress("cancelled", reason="OWNER_CANCELLED")
         if (w.phase==WorkflowPhase.DRAFT_PR_CREATED) return TaskProgress("done", publisher(issue).publish().url, "ALREADY_PUBLISHED")
-        if (w.hold!=WorkflowHold.NONE) return TaskProgress("held", reason=w.holdReason ?: "CANCEL_UNKNOWN")
+        if (w.hold!=WorkflowHold.NONE) return terminalOrHeld(w)
         val taskDb=RuntimeDatabase(dbFile)
         val blocked=w.phase==WorkflowPhase.PUBLISHING || taskDb.read { c ->
             c.rows("SELECT 1 FROM effects_outbox WHERE workflow_id=? AND state IN ('SENDING','UNCERTAIN')",w.id) { 1 }.isNotEmpty() ||

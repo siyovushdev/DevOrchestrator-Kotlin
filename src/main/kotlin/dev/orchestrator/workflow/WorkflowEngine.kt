@@ -255,7 +255,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
             check(ownerGo())
             if (!fixtureCli) {
                 if (!CodexAttestation.nativeBinary(codex.toRealPath()) ||
-                    !LocalSecretCanary.pass(codex.toRealPath(), copy.filesDirectory, home, artifacts, python))
+                    !LocalSecretCanary.pass(codex.toRealPath(), copy.filesDirectory, home, python, false))
                     return terminalProbe(w, id, "CODEX_CANARY_FAILED")
             }
             val observed = NativeProcessRunner(python).run(LinuxIsolation.prefix(copy.filesDirectory,false,home,codex,output)+

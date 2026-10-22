@@ -72,8 +72,10 @@ def run(config):
         if name != "DEVORCH_PUBLISH_TOKEN":
             raise ValueError("Unsupported private environment")
         environment[name] = os.environ[name]
+    def die_with_parent():
+        libc.prctl(1, signal.SIGKILL, 0, 0, 0)
     child = subprocess.Popen(config["argv"], cwd=config["cwd"], env=environment,
-                             start_new_session=True)  # stdin/out/err inherited from Kotlin pipes
+                             start_new_session=True, preexec_fn=die_with_parent)
     root = identity(child.pid)
     root_exit = None
     root_exit_at = None

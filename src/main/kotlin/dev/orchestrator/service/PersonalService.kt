@@ -90,10 +90,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
         }
         noteBlockedCancels(previous)
         if(previous.any { it.state=="held" }) return "NEEDS_OWNER"
-        val pendingCancel=previous.firstOrNull {
-            ownerCancelRequested(file.parent, it.issue.issueNumber) && it.state!="held" &&
-                it.stage!="cancelled" && it.stage!="cancel-refused"
-        }
+        val pendingCancel=previous.firstOrNull { cancellable(it) }
         if (pendingCancel!=null) return applyOwnerCancel(pendingCancel)
         var task=previous.firstOrNull { it.state!="done" }
         if(task==null) {
@@ -113,8 +110,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
             if (ownerCancelRequested(file.parent, task.issue.issueNumber)) return applyOwnerCancel(task)
         }
         val i=task.issue
-        if (ownerCancelRequested(file.parent, i.issueNumber) && task.stage!="cancelled" && task.stage!="cancel-refused")
-            return applyOwnerCancel(task)
+        if (cancellable(task)) return applyOwnerCancel(task)
         if(!github.authorized(i)) { hold(i,"OWNER_LABEL_OR_ISSUE_CHANGED"); status(i,"held"); return "NEEDS_OWNER" }
         try {
             if(!status(i,task.stage,task.url)) return "NEEDS_OWNER"
@@ -248,11 +244,14 @@ internal class PersonalService(private val file: Path, private val github: Servi
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
 
     /** Leaves workflow holds and publication rows in place. Does not delete service.db or send PUSH/POST. */
-    fun releaseHeld(number: Int): String {
+    fun releaseHeld(number: Int, ssh: dev.orchestrator.remote.SshWorkerConfig? = null): String {
         requireHealthy()
         val task=tasks().singleOrNull { it.issue.issueNumber==number } ?: return "NO_TASK"
         if (task.state=="done" && task.stage in terminalStages) return "ALREADY_TERMINAL"
         if (task.state!="held") return "NOT_HELD"
+        val runDb=file.parent.resolve("task-${task.issue.githubIssueId}/run.db")
+        dev.orchestrator.agent.nativecli.LocalProcessControl.stopOrphans(runDb)
+        if (ssh!=null) dev.orchestrator.agent.nativecli.LocalProcessControl.cancelGuests(runDb, ssh)
         db.write { c ->
             c.mutate("""UPDATE personal_tasks SET state='done',stage='released',reason='OWNER_RELEASED',resume_state=NULL,resume_reason=NULL
                 WHERE issue_id=? AND state='held'""", task.issue.githubIssueId)
@@ -268,6 +267,8 @@ internal class PersonalService(private val file: Path, private val github: Servi
         return stage.uppercase()
     }
 
+    private fun cancellable(task: Task)=ownerCancelRequested(file.parent, task.issue.issueNumber) &&
+        task.state!="held" && task.stage !in terminalStages
     private fun noteBlockedCancels(previous: List<Task>) {
         for (t in previous.filter { it.state=="held" && ownerCancelRequested(file.parent, it.issue.issueNumber) }) {
             val state=db.read { c -> c.rows("SELECT state FROM owner_cancels WHERE issue_number=?", t.issue.issueNumber) { it.getString(1) }.singleOrNull() }
@@ -280,7 +281,13 @@ internal class PersonalService(private val file: Path, private val github: Servi
             if (!status(i,"cancelled",task.url)) return "NEEDS_OWNER"
             return "CANCELLED"
         }
+        if (task.state=="done" && task.stage in terminalStages) {
+            if (!status(i, task.stage, task.url)) return "NEEDS_OWNER"
+            return "TERMINAL"
+        }
         val outcome=runtime.cancel(i)
+        if (outcome.stage=="timed_out" || outcome.reason=="STAGE_TIMEOUT") return finishTerminal(i, "timed_out", "STAGE_TIMEOUT")
+        if (outcome.stage=="unattested") return finishTerminal(i, "unattested", outcome.reason ?: "CODEX_NOT_ATTESTED")
         when (outcome.reason) {
             "NOT_STARTED","OWNER_CANCELLED" -> {
                 db.write { c -> c.mutate("""UPDATE personal_tasks SET state='done',stage='cancelled',reason='OWNER_CANCELLED',url=NULL,

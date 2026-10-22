@@ -161,18 +161,34 @@ print('{"type":"turn.completed"}')
         assertEquals("FINISHED",RemoteProtocol.mapper.readTree(result)["state"].asText())
         assertEquals(1,Files.readAllLines(calls).size)
     }
-    @Test fun lostSshWhileRunningLeavesDetachedSupervisorAndOnlyReadOnlyRecovery() {
-        setup("import time; time.sleep(1)")
+    @Test fun lostSshKillsTheGuestInsteadOfLeavingItRunning() {
+        setup("import time; time.sleep(30)")
         val r=request(timeout=4000); val j=journal()
         val cut=WorkerTransport { w,_ -> WorkerWireProcess.exchange(listOf("/usr/bin/python3","-I","-S",worker.toString(),"serve",config.toString()),w,350) }
         assertFailsWith<RemoteExchangeUnknown> { client(j,cut).submit(r) { true } }
+        Thread.sleep(400)
         val observed=RemoteProtocol.mapper.readTree(transport().exchange(query(r),3000))
-        assertTrue(observed["state"].asText() in setOf("RUNNING","FINISHED"))
-        val deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10)
-        while(!Files.exists(root.resolve("a1/result.json")) && System.nanoTime()<deadline) Thread.sleep(30)
-        assertTrue(Files.exists(root.resolve("a1/result.json")))
-        assertEquals("EVIDENCE_STORED",client(journal()).reconcile("a1"))
-        assertEquals(1,Files.readAllLines(calls).size)
+        assertNotEquals("RUNNING", observed["state"].asText())
+        assertFalse(Files.exists(root.resolve("a1/result.json")))
+        val before=if (Files.exists(calls)) Files.readAllLines(calls).size else 0
+        assertEquals("UNKNOWN", client(journal()).reconcile("a1"))
+        val after=if (Files.exists(calls)) Files.readAllLines(calls).size else 0
+        assertEquals(before, after)
+    }
+    @Test fun sshStageTimeoutIsTimeoutNotAHeldSuccess() {
+        setup("import time; time.sleep(5)")
+        val state=client().submit(request(timeout=300)) { true }
+        assertEquals("TIMEOUT", state)
+        assertFalse(Files.exists(root.resolve("a1/result.json")))
+        assertTrue(Files.readString(root.resolve("a1/failure.json")).contains("STAGE_TIMEOUT"))
+    }
+    @Test fun forgedUsageJsonIsNotCodexAttestation() {
+        val usageOnly=RemoteProtocol.mapper.readTree("""{"usage":{"input_tokens":1,"output_tokens":1}}""")
+        assertFalse(dev.orchestrator.agent.nativecli.CodexAttestation.guestBinary(usageOnly))
+        val script=RemoteProtocol.mapper.readTree("""{"codexBinary":{"elf":false,"size":40,"sha256":"${"ab".repeat(32)}"}}""")
+        assertFalse(dev.orchestrator.agent.nativecli.CodexAttestation.guestBinary(script))
+        val elf=RemoteProtocol.mapper.readTree("""{"codexBinary":{"elf":true,"size":2000000,"sha256":"${"cd".repeat(32)}"}}""")
+        assertTrue(dev.orchestrator.agent.nativecli.CodexAttestation.guestBinary(elf))
     }
     @Test fun neverSentUnknownAndOwnerDenialDoNotAuthorizeReplayOrOtherSlot() {
         setup(); val j=journal(); val r=request(); var calls=0

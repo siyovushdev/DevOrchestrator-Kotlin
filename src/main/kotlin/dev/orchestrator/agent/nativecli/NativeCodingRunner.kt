@@ -140,7 +140,7 @@ internal class NativeCodingRunner(
         if (!ownerGo() || !journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
         if (!fixtureCli) {
             if (!CodexAttestation.nativeBinary(codex.toRealPath())) return complete(AttemptState.FAILED,"CODEX_NOT_ATTESTED")
-            if (!LocalSecretCanary.pass(codex.toRealPath(), intent.workspace, home, artifacts, python))
+            if (!LocalSecretCanary.pass(codex.toRealPath(), intent.workspace, home, python, true))
                 return complete(AttemptState.FAILED,"CODEX_CANARY_FAILED")
         }
         val observation = NativeProcessRunner(python,outputLimit).run(

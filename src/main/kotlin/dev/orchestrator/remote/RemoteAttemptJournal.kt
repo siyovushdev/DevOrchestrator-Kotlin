@@ -50,7 +50,7 @@ internal class RemoteAttemptJournal(file: Path) {
         return true
     }
     fun record(id: String,state: String,evidence: ByteArray?=null,diagnostic: String?=null) = db.write { c ->
-        require(state in setOf("UNKNOWN","RUNNING","EVIDENCE_STORED"))
+        require(state in setOf("UNKNOWN","RUNNING","EVIDENCE_STORED","TIMEOUT"))
         val current=c.rows("SELECT state,evidence FROM remote_attempts WHERE attempt_id=?",id) { it.getString(1) to it.getBytes(2) }.single()
         if(current.first=="EVIDENCE_STORED") {
             check(state==current.first && current.second.contentEquals(evidence)) { "REMOTE_IMMUTABLE_RESULT_CHANGED" }
@@ -99,6 +99,7 @@ internal class RemoteWorkerClient(private val journal: RemoteAttemptJournal,priv
             state=when(result.path("state").asText()) {
                 "FINISHED" -> { evidence.check(request,bytes); "EVIDENCE_STORED" }
                 "RUNNING" -> "RUNNING"
+                "TIMEOUT" -> "TIMEOUT"
                 else -> "UNKNOWN" // NOT_FOUND/DENIED is not permission to resubmit.
             }
         } catch(e: Exception) {

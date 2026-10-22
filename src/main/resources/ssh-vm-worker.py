@@ -4,6 +4,7 @@ No outer sandbox around Codex. Only unittest children enter bubblewrap. A durabl
 claim is never retried; query reads saved facts and never executes a task.
 """
 import base64
+import ctypes
 import fcntl
 import hashlib
 import importlib.util
@@ -283,12 +284,11 @@ def native_policy(c, source, attempt, role, supervisor):
     probe = source / ('devorch-policy-probe-' + os.urandom(12).hex())
     write(probe, b'public-source-probe')
     script = ("from pathlib import Path\n"
-              "for text in " + repr([str(canary), str(attempt / 'request.json'), str(INSTALL / 'ssh-vm-worker.py'),
-                                    '/proc/self/root' + str(canary), '/proc/' + str(os.getpid()) + '/environ']) + ":\n"
+              "secret=Path(" + repr(str(canary)) + ")\n"
+              "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\nelse:\n raise SystemExit(91)\n"
+              "for text in " + repr([str(attempt / 'request.json'), str(INSTALL / 'ssh-vm-worker.py'),
+                                    '/proc/' + str(os.getpid()) + '/environ']) + ":\n"
               " p=Path(text)\n"
-              " try: p.read_bytes()\n"
-              " except OSError: pass\n"
-              " else: raise SystemExit(91)\n"
               " try: p.open('r+b')\n"
               " except OSError: pass\n"
               " else: raise SystemExit(92)\n"
@@ -317,7 +317,17 @@ def native_policy(c, source, attempt, role, supervisor):
     return overrides
 
 
+def arm_parent_death():
+    libc = ctypes.CDLL(None, use_errno=True)
+    # SIGKILL: a dead controller SSH session must not leave this guest running.
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), 'parent-death signal unavailable')
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
 def execute(c, attempt):
+    arm_parent_death()
     r = request(read(attempt / 'request.json'))
     supervisor = supervisor_module()
     identity = {'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
@@ -364,7 +374,10 @@ def execute(c, attempt):
             raw = supervisor.run({'argv': argv, 'cwd': str(source), 'env': child_env,
                                   'timeout_ms': r['timeoutMs'], 'namespace_boundary': role == 'TESTS'})
         write(attempt / 'supervisor.json', encoded(raw))
-        if (attempt / 'cancel.request').exists() or (raw and raw.get('cause') in ('timeout', 'stop_requested')):
+        if raw and raw.get('cause') == 'timeout':
+            write(attempt / 'failure.json', encoded({'state': 'TIMEOUT', 'code': 'STAGE_TIMEOUT'}))
+            return
+        if (attempt / 'cancel.request').exists() or (raw and raw.get('cause') == 'stop_requested'):
             write(attempt / 'failure.json', encoded({'state': 'UNKNOWN', 'code': 'CANCELLED_OR_NOT_EXITED'}))
             return
         if not raw or not raw.get('cleanup_echild'):
@@ -379,7 +392,11 @@ def execute(c, attempt):
             if p.exists():
                 data = read(p, 1024 * 1024)
                 artifacts[name] = {'data': base64.b64encode(data).decode(), 'sha256': sha(data)}
-        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts}
+        binary = None
+        if role != 'TESTS':
+            raw_bin = Path(c['codex']).read_bytes()
+            binary = {'elf': raw_bin.startswith(b'\x7fELF'), 'size': len(raw_bin), 'sha256': sha(raw_bin)}
+        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts, 'codexBinary': binary}
         result.update({'version': 1, 'requestSha256': sha(read(attempt / 'request.json')), 'workerSha256': installation_digest(), 'identity': r['identity'], 'started': identity, 'nativePolicyReceipt': load(read(attempt / 'policy-receipt.json')) if role != 'TESTS' else None})
         payload = encoded(result)
         if len(payload) > LIMIT:
@@ -429,6 +446,10 @@ def query(root, attempt_id, digest):
         raise ValueError('query digest mismatch')
     if (attempt / 'result.json').exists():
         return load(read(attempt / 'result.json'))
+    if (attempt / 'failure.json').exists():
+        failure = load(read(attempt / 'failure.json'))
+        if failure.get('state') == 'TIMEOUT' or failure.get('code') == 'STAGE_TIMEOUT':
+            return {'state': 'TIMEOUT'}
     result = {'state': 'UNKNOWN'}
     if (attempt / 'started.json').exists():
         started = load(read(attempt / 'started.json'))

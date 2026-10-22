@@ -27,30 +27,51 @@ internal object CodexAttestation {
         usage.path("input_tokens").isIntegralNumber && usage.path("input_tokens").asInt() > 0 &&
             usage.path("output_tokens").isIntegralNumber
     } catch (_: Exception) { false }
+
+    /** Usage JSON alone is not attestation. The worker must have measured an ELF binary. */
+    fun guestBinary(result: com.fasterxml.jackson.databind.JsonNode): Boolean {
+        val bin = result.path("codexBinary")
+        val sha = bin.path("sha256").asText("")
+        return bin.path("elf").asBoolean(false) && bin.path("size").asLong(0) >= 1_000_000 &&
+            sha.matches(Regex("[0-9a-f]{64}"))
+    }
 }
 
 /**
  * No-inference probe. The artificial file is not a controller or GitHub secret.
- * A stand-in that exits 0 without running the probe does not create the marker.
+ * Success is a write denied outside the workspace and, for Coding, a write inside it.
+ * A consistent workspace sandbox and the SSH deny-root profile can both pass.
+ * The marker stays inside the workspace; fixtureCli is not required.
  */
 internal object LocalSecretCanary {
     const val SECRET = "ARTIFICIAL_POLICY_SECRET"
-    fun pass(codex: Path, workspace: Path, home: Path, artifacts: Path, python: Path): Boolean {
+    fun pass(codex: Path, workspace: Path, home: Path, python: Path, writable: Boolean): Boolean {
         val canary = home.resolve(".codex").resolve("devorch-policy-canary")
+        Files.createDirectories(canary.parent)
         if (!Files.exists(canary)) Files.writeString(canary, SECRET)
         if (Files.readString(canary) != SECRET) return false
-        val run = Files.createDirectories(artifacts.resolve("canary-${System.nanoTime()}"))
-        val marker = run.resolve("canary-pass")
+        val marker = workspace.resolve(".devorch-canary-marker")
+        if (Files.exists(marker)) Files.delete(marker)
+        val run = Files.createDirectories(workspace.resolve(".devorch-canary-run"))
         val script = "from pathlib import Path\n" +
             "secret=Path(" + ObjectMapper().writeValueAsString(canary.toString()) + ")\n" +
-            "try:\n secret.read_bytes()\nexcept OSError:\n pass\nelse:\n raise SystemExit(91)\n" +
-            "Path(" + ObjectMapper().writeValueAsString(marker.toString()) + ").write_text('ok')\n"
-        val observed = NativeProcessRunner(python).run(listOf(codex.toString(), "sandbox", "--ignore-user-config",
-            "--ignore-rules", "--strict-config", "--", python.toString(), "-I", "-S", "-c", script),
-            workspace, mapOf("HOME" to home.toString(), "CODEX_HOME" to home.resolve(".codex").toString(),
-                "PATH" to "/usr/bin:/bin", "LANG" to "C"), run, ByteArray(0), 15_000) { true }
-        return observed.state == dev.orchestrator.storage.AttemptState.SUCCEEDED &&
-            Files.readString(canary) == SECRET && Files.isRegularFile(marker)
+            "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\nelse:\n raise SystemExit(91)\n" +
+            "marker=Path(" + ObjectMapper().writeValueAsString(marker.toString()) + ")\n" +
+            "wrote=False\ntry:\n marker.write_text('ok')\n wrote=True\nexcept OSError:\n pass\n" +
+            "if " + (if (writable) "not wrote" else "wrote") + ":\n raise SystemExit(94)\n"
+        val sandbox = if (writable) "workspace-write" else "read-only"
+        val observed = try {
+            NativeProcessRunner(python).run(listOf(codex.toString(), "sandbox", "--ignore-user-config",
+                "--ignore-rules", "--strict-config", "--sandbox", sandbox, "--", python.toString(), "-I", "-S", "-c", script),
+                workspace, mapOf("HOME" to home.toString(), "CODEX_HOME" to home.resolve(".codex").toString(),
+                    "PATH" to "/usr/bin:/bin", "LANG" to "C"), run, ByteArray(0), 15_000) { true }
+        } finally {
+            run.toFile().deleteRecursively()
+        }
+        val secretOk = Files.readString(canary) == SECRET
+        val markerOk = if (writable) Files.isRegularFile(marker) && Files.readString(marker) == "ok" else !Files.exists(marker)
+        if (Files.exists(marker)) Files.delete(marker)
+        return observed.state == dev.orchestrator.storage.AttemptState.SUCCEEDED && secretOk && markerOk
     }
 }
 
