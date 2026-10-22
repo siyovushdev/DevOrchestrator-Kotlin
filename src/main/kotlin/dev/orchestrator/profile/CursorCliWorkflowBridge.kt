@@ -93,7 +93,8 @@ internal class CursorCliWorkflowBridge(private val engine: WorkflowEngine, priva
         val observed = spawned.observation
         if (observed.state == AttemptState.UNKNOWN) return unknown(w.id, intent.attemptId, true)
         if (observed.state == AttemptState.CANCELLED) return cancelled(w.id, intent.attemptId)
-        if (observed.state != AttemptState.SUCCEEDED || observed.evidence == null) return failed(w.id, intent.attemptId)
+        if (observed.state != AttemptState.SUCCEEDED || observed.evidence == null || !cursorCliSucceeded(spawned.stdout))
+            return failed(w.id, intent.attemptId)
         val tree = RemoteProtocol.tree(intent.workspace, Files.createTempDirectory(engine.artifactRoot, "cli-tree-"))
         val session = sessionId(intent.attemptId)
         val logs = Files.createDirectories(engine.artifactRoot.resolve("log-${intent.attemptId}"))
@@ -234,6 +235,7 @@ ${mapper.writeValueAsString(verdict)}
         }
         val observed = spawned.observation
         if (observed.state != AttemptState.SUCCEEDED || observed.evidence == null) return unknown(w.id, id, false)
+        if (!cursorCliSucceeded(spawned.stdout)) return refuse(w.id, id, "CLI_STAGE_FAILED")
         val after = RemoteProtocol.tree(intent.workspace, Files.createTempDirectory(engine.artifactRoot, "cli-review-after-"))
         if (after != before) return refuse(w.id, id, "CLI_TREE_CHANGED")
         val parsed = parseVerdict(spawned.stdout)
@@ -272,7 +274,7 @@ ${mapper.writeValueAsString(verdict)}
         val artifacts = Files.createTempDirectory(engine.artifactRoot, "cli-spawn-")
         val observed = NativeProcessRunner(Path.of("/usr/bin/python3")).run(
             argv, workspace, controllerEnvironment(), artifacts, prompt, engine.timeout.toMillis(),
-            stopRequested = engine.stopRequested, onStarted = onStarted,
+            reapDescendants = true, stopRequested = engine.stopRequested, onStarted = onStarted,
         )
         val log = artifacts.resolve("events.log")
         return Spawned(observed, if (Files.isRegularFile(log)) Files.readString(log) else "")
@@ -364,14 +366,43 @@ ${mapper.writeValueAsString(verdict)}
 """)
         }
 
+        /** Exit 0 is not enough. The CLI result must say success and is_error false. */
+        fun cursorCliSucceeded(stdout: String): Boolean {
+            val result = cursorCliResult(stdout) ?: return false
+            if (!result.has("is_error") || result.path("is_error").asBoolean(true)) return false
+            return result.path("subtype").asText() == "success"
+        }
+
+        private fun cursorCliResult(stdout: String): com.fasterxml.jackson.databind.JsonNode? {
+            val mapper = ObjectMapper()
+            val found = mutableListOf<com.fasterxml.jackson.databind.JsonNode>()
+            fun consider(node: com.fasterxml.jackson.databind.JsonNode) {
+                if (node.path("type").asText() == "result" || (node.has("subtype") && node.has("is_error"))) found.add(node)
+            }
+            stdout.lineSequence().map { it.trim() }.filter { it.startsWith("{") }.forEach { line ->
+                try { consider(mapper.readTree(line)) } catch (_: Exception) {}
+            }
+            if (found.isEmpty()) {
+                try { consider(mapper.readTree(stdout)) } catch (_: Exception) {}
+            }
+            return found.lastOrNull()
+        }
+
         private fun parseVerdict(text: String): ObjectNode {
+            val mapper = ObjectMapper()
+            fun match(node: com.fasterxml.jackson.databind.JsonNode): ObjectNode? {
+                if (node !is ObjectNode) return null
+                val fields = node.fieldNames().asSequence().toSet()
+                return if (fields == setOf("verdict", "candidate_id", "manifest_sha256", "candidate_tree", "generation", "findings")) node else null
+            }
+            val lines = text.lineSequence().map { it.trim() }.filter { it.startsWith("{") }.mapNotNull { line ->
+                try { match(mapper.readTree(line)) } catch (_: Exception) { null }
+            }.toList()
+            if (lines.size == 1) return lines.single()
             val start = text.indexOf('{')
             val end = text.lastIndexOf('}')
             require(start >= 0 && end > start)
-            val node = ObjectMapper().readTree(text.substring(start, end + 1))
-            require(node is ObjectNode)
-            require(node.fieldNames().asSequence().toSet() == setOf("verdict", "candidate_id", "manifest_sha256", "candidate_tree", "generation", "findings"))
-            return node
+            return requireNotNull(match(mapper.readTree(text.substring(start, end + 1))))
         }
 
         private fun launches(db: dev.orchestrator.storage.RuntimeDatabase) {

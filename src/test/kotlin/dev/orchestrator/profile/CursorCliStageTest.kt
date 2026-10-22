@@ -9,6 +9,7 @@ import dev.orchestrator.storage.AttemptState
 import dev.orchestrator.storage.GitHubIssueRecord
 import dev.orchestrator.storage.RuntimeDatabase
 import dev.orchestrator.storage.rows
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -47,6 +48,48 @@ class CursorCliStageTest {
         }
         assertEquals(2, stages.map { it[0] }.toSet().size)
         assertTrue(stages.all { it[1] == "cursor-cli" && it[2] == "cli" && it[3] == "subscription" && it[4] == "account-default" && it[5] == "DEFAULT" })
+    }
+
+    @Test fun `exit zero with a live child finishes coding after the child is reaped`() {
+        val cli = fixture("child")
+        val world = runtime(cli, null)
+        world.runtime.prepare(world.issue)
+        val progress = world.runtime.step(world.issue)
+        assertEquals("tests", progress.stage)
+        val pid = Files.readString(temp.resolve("sleeper.pid")).trim().toLong()
+        val alive = Path.of("/proc/$pid")
+        if (Files.exists(alive)) assertFalse(Files.readString(alive.resolve("cmdline")).contains(cli.fileName.toString()))
+        val receipt = Files.walk(world.task.resolve("artifacts")).use { stream ->
+            stream.filter { it.fileName.toString() == "supervisor-receipt.json" }.findFirst().orElseThrow()
+        }
+        val node = ObjectMapper().readTree(Files.readString(receipt))
+        assertEquals(0, node.path("exit_code").asInt())
+        assertEquals("exited", node.path("cause").asText())
+        assertTrue(node.path("cleanup_echild").asBoolean())
+        assertTrue(node.path("reaped").asInt() >= 2)
+        val state = RuntimeDatabase(world.task.resolve("run.db")).read { c ->
+            c.rows("SELECT state FROM cli_stage_runs") { it.getString(1) }.single()
+        }
+        assertEquals("FINISHED", state)
+    }
+
+    @Test fun `a non-zero exit or is_error does not finish the stage`() {
+        assertFalse(CursorCliWorkflowBridge.cursorCliSucceeded("""{"type":"result","subtype":"success","is_error":true}"""))
+        assertFalse(CursorCliWorkflowBridge.cursorCliSucceeded("""{"type":"result","subtype":"error","is_error":false}"""))
+        assertTrue(CursorCliWorkflowBridge.cursorCliSucceeded("""{"type":"result","subtype":"success","is_error":false}"""))
+        for (kind in listOf("error", "nonzero")) {
+            val cli = fixture(kind)
+            val log = temp.resolve("agent.log")
+            val world = runtime(cli, null)
+            world.runtime.prepare(world.issue)
+            val progress = world.runtime.step(world.issue)
+            assertEquals("held", progress.stage, kind)
+            assertEquals("CODING_RUNNER_FAILED", progress.reason, kind)
+            assertEquals(1, if (Files.exists(log)) Files.readAllLines(log).size else 0, kind)
+            world.runtime.step(world.issue)
+            assertEquals(1, Files.readAllLines(log).size, kind)
+            Files.delete(log)
+        }
     }
 
     @Test fun `a missing CLI fails the stage and does not fall through`() {
@@ -108,19 +151,42 @@ class CursorCliStageTest {
         return World(root.resolve("task-9001"), runtime, issue)
     }
 
-    private fun fixture(): Path {
-        val cli = temp.resolve("agent")
-        Files.writeString(cli, """#!/usr/bin/env python3
-import pathlib, sys
-prompt = sys.argv[-1]
-pathlib.Path(__file__).with_name("agent.log").open("a").write(" ".join(sys.argv[:-1]) + "\n")
+    private fun fixture(kind: String = "success"): Path {
+        val cli = temp.resolve(if (kind == "success") "agent" else "agent-$kind")
+        val body = when (kind) {
+            "child" -> """
+import os, time
+pid = os.fork()
+if pid == 0:
+    time.sleep(30)
+    os._exit(0)
+pathlib.Path(__file__).with_name("sleeper.pid").write_text(str(pid))
+print('{"type":"result","subtype":"success","is_error":false}')
+"""
+            "error" -> """
+print('{"type":"result","subtype":"success","is_error":true}')
+"""
+            "nonzero" -> """
+print('{"type":"result","subtype":"success","is_error":false}')
+raise SystemExit(2)
+"""
+            else -> """
 if "Review the saved" in prompt:
     start = prompt.rfind('{"verdict"')
     print(prompt[start:].strip())
+    print('{"type":"result","subtype":"success","is_error":false}')
     raise SystemExit(0)
 pathlib.Path("clamp.py").write_text("def clamp(value, low, high):\n    return min(high, max(low, value))\n")
 pathlib.Path("tests").mkdir(exist_ok=True)
 pathlib.Path("tests/test_clamp.py").write_text("import unittest\nfrom clamp import clamp\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, clamp(1, 0, 2))\n")
+print('{"type":"result","subtype":"success","is_error":false}')
+"""
+        }
+        Files.writeString(cli, """#!/usr/bin/env python3
+import pathlib, sys
+prompt = sys.argv[-1]
+pathlib.Path(__file__).with_name("agent.log").open("a").write(" ".join(sys.argv[:-1]) + "\n")
+${body.trimIndent()}
 """)
         cli.toFile().setExecutable(true)
         return cli
