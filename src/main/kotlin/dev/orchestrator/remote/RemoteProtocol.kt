@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import dev.orchestrator.agent.nativecli.BoundedNativeProbeReader
 import dev.orchestrator.agent.nativecli.ProbeProcessResult
 import dev.orchestrator.agent.nativecli.TrustedGitCheckoutGuard
+import dev.orchestrator.review.isUnpublishedPythonBytecode
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -88,6 +89,9 @@ internal object RemoteProtocol {
         fun command(vararg args: String)=git(files,"--git-dir=$objects","--work-tree=$files",
             "-c","core.hooksPath=/dev/null",*args)
         command("read-tree","--empty"); command("add","--force","--all","--",".")
+        command("ls-files").lineSequence().filter { it.isNotBlank() && isUnpublishedPythonBytecode(it) }.forEach { name ->
+            command("rm","--cached","--",name)
+        }
         return command("write-tree").also { require(sha(it,40)) }
     }
     fun installationDigest(): String {

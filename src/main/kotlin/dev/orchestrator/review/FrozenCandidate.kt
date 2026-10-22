@@ -15,6 +15,15 @@ import java.util.Base64
 
 internal enum class VerificationStatus { PASS, FAIL, NOT_RUN }
 
+/** Controller unittest output. It records the checkout path and is not source. */
+internal fun isUnpublishedPythonBytecode(relative: String): Boolean {
+    val path = Path.of(relative)
+    return path.any { part ->
+        val name = part.toString()
+        name == "__pycache__" || name.endsWith(".pyc")
+    }
+}
+
 /** IDs are supplied by the trusted controller, never accepted from an agent report. */
 internal data class CandidateBinding(
     val workflowId: String,

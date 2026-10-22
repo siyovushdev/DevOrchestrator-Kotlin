@@ -59,7 +59,7 @@ class DraftPrPublisherTest {
         c.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES ('wf',?,?,?)",
             type,mapper.writeValueAsString(value),Instant.EPOCH.toString())
     }
-    private fun fixture(badVerification: Boolean=false,badReview: Boolean=false) {
+    private fun fixture(badVerification: Boolean=false,badReview: Boolean=false,bytecode: Boolean=false) {
         listOf(source,root,temp.resolve("snapshots"),temp.resolve("verify"),temp.resolve("coding-artifacts"),temp.resolve("review-artifacts"),temp.resolve("template")).forEach { Files.createDirectory(it) }
         Files.writeString(source.resolve("README"),"base\n")
         git(source,"init","-q","--initial-branch=main","--template=${temp.resolve("template")}")
@@ -88,6 +88,15 @@ class DraftPrPublisherTest {
             mapOf("pid" to "100","start_ticks" to "10","boot_id" to "mock-boot","machine_id" to "mock-machine")))))
         Files.writeString(source.resolve("README"),"reviewed result\n")
         Files.createDirectory(source.resolve("src")); Files.writeString(source.resolve("src/add.py"),"def add(a,b): return a+b\n")
+        if (bytecode) {
+            val sourceCache=Files.createDirectories(source.resolve("src/__pycache__"))
+            Files.write(sourceCache.resolve("suffix_bang.cpython-312.pyc"),
+                "co_filename=/home/controller/checkout/src/suffix_bang.py".toByteArray())
+            Files.createDirectories(source.resolve("tests"))
+            val testCache=Files.createDirectories(source.resolve("tests/__pycache__"))
+            Files.write(testCache.resolve("test_suffix_bang.cpython-312.pyc"),
+                "co_filename=/home/controller/checkout/tests/test_suffix_bang.py".toByteArray())
+        }
         git(source,"add","--all"); tree=git(source,"write-tree")
         Files.writeString(temp.resolve("coding-artifacts/events.log"),"{\"type\":\"thread.started\",\"thread_id\":\"coding-session\"}\n{\"type\":\"turn.completed\"}\n")
         Files.writeString(temp.resolve("review-artifacts/events.log"),"{\"type\":\"thread.started\",\"thread_id\":\"review-session\"}\n{\"type\":\"turn.completed\"}\n")
@@ -164,6 +173,25 @@ class DraftPrPublisherTest {
     private fun publisher()=DraftPrPublisher(database,root,base,GitHubPublicationApi(http),sender,{p,k->permit(p,k)})
     private fun phase()=store.findWorkflow(SMOKE_TARGET.repositoryId,1)!!
 
+    @Test fun `bytecode is not published and the commit time is not the epoch`() {
+        fixture(bytecode=true)
+        val result=publisher().publish()
+        assertEquals("DRAFT_PR_CREATED",result.status)
+        val plan=journal.findPlan("wf")!!
+        val published=git(temp,"--git-dir=$bare","show","-s","--format=%T",plan.commitSha)
+        assertNotEquals(tree,published)
+        assertEquals(plan.commitTree,published)
+        assertEquals(tree,plan.candidateTree)
+        val names=git(temp,"--git-dir=$bare","ls-tree","-r","--name-only",published)
+        assertFalse(names.contains("__pycache__"))
+        assertFalse(names.contains(".pyc"))
+        assertTrue(names.contains("src/add.py"))
+        val authored=git(temp,"--git-dir=$bare","show","-s","--format=%at",plan.commitSha)
+        val committed=git(temp,"--git-dir=$bare","show","-s","--format=%ct",plan.commitSha)
+        assertEquals(authored,committed)
+        assertNotEquals("0",authored)
+        assertTrue(authored.toLong() in (Instant.now().epochSecond-300)..Instant.now().epochSecond)
+    }
     @Test fun publishesExactSavedTreeAndOneDraftThenRestartHasNoWrites() {
         fixture(); val originalIndex=Files.readAllBytes(source.resolve(".git/index"))
         val result=publisher().publish()
@@ -171,6 +199,11 @@ class DraftPrPublisherTest {
         assertEquals("https://github.com/${SMOKE_TARGET.fullName}/pull/7",result.url)
         val plan=journal.findPlan("wf")!!
         assertEquals(tree,git(temp,"--git-dir=$bare","show","-s","--format=%T",plan.commitSha))
+        val authored=git(temp,"--git-dir=$bare","show","-s","--format=%at",plan.commitSha)
+        val committed=git(temp,"--git-dir=$bare","show","-s","--format=%ct",plan.commitSha)
+        assertEquals(authored,committed)
+        assertNotEquals("0",authored)
+        assertTrue(authored.toLong() in (Instant.now().epochSecond-300)..Instant.now().epochSecond)
         assertEquals(base,git(temp,"--git-dir=$bare","show","-s","--format=%P",plan.commitSha))
         assertEquals(base,git(source,"rev-parse","HEAD")); assertContentEquals(originalIndex,Files.readAllBytes(source.resolve(".git/index")))
         assertTrue(candidate.isIntact()); assertEquals(WorkflowPhase.DRAFT_PR_CREATED,phase().phase)

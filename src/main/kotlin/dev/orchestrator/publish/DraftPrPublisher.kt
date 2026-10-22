@@ -11,6 +11,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.time.Instant
 
 internal data class PublicationResult(val status: String, val url: String? = null)
 
@@ -47,12 +48,14 @@ internal class DraftPrPublisher(
             if (plan==null) {
                 check(w.phase==WorkflowPhase.READY_FOR_PR)
                 val dir=privateDirectory(publisherRoot.resolve(w.id))
-                stage(evidence,dir)
+                val published=stage(evidence,dir)
                 val candidate=evidence.candidate
-                val content=commitBytes(candidate.binding.candidateTree,w.id,candidate.candidateId,candidate.manifestSha256)
+                val commitTime=Instant.now().epochSecond
+                val content=commitBytes(published,w.id,candidate.candidateId,candidate.manifestSha256,commitTime)
                 plan=PublicationPlan(w.id,target.repositoryId,issueNumber,target.owner,target.name,"main",expectedBase,
                     objectId(content),candidate.binding.candidateTree,candidate.manifestSha256,candidate.candidateId,
-                    evidence.coding.attemptId,evidence.reviewer,w.correctionsUsed,evidence.coding.policyVersion,w.version)
+                    evidence.coding.attemptId,evidence.reviewer,w.correctionsUsed,evidence.coding.policyVersion,w.version,
+                    published,commitTime)
                 Files.write(dir.resolve("commit.txt"),content,CREATE_NEW)
                 check(journal.prepare(plan))
             }
@@ -78,7 +81,7 @@ internal class DraftPrPublisher(
                 val receipt: PublicationReadBack=when (kind) {
                     EffectKind.COMMIT -> {
                         check(Files.readAllBytes(dir.resolve("commit.txt")).contentEquals(commitBytes(
-                            plan.candidateTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256)))
+                            plan.commitTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256,plan.commitTime)))
                         check(local(dir,"hash-object","-t","commit","-w",dir.resolve("commit.txt").toString())==plan.commitSha)
                         localCommit(plan)
                     }
@@ -152,7 +155,7 @@ internal class DraftPrPublisher(
             plan.candidateId==e.candidate.candidateId && plan.codingAttemptId==e.coding.attemptId &&
             plan.reviewerAttemptId==e.reviewer && plan.generation==e.w.correctionsUsed &&
             plan.policyVersion==e.coding.policyVersion &&
-            plan.commitSha==objectId(commitBytes(plan.candidateTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256)))
+            plan.commitSha==objectId(commitBytes(plan.commitTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256,plan.commitTime)))
         check(e.w.version==plan.workflowVersion+(if (e.w.phase==WorkflowPhase.READY_FOR_PR) 0 else 1) || e.w.hold!=WorkflowHold.NONE)
     }
 
@@ -282,7 +285,7 @@ internal class DraftPrPublisher(
             events.none { it.path("type").asText() in setOf("error","turn.failed") })
         return events.single { it.path("type").asText()=="thread.started" }.path("thread_id").asText()
     }
-    private fun stage(e: Evidence, dir: Path) {
+    private fun stage(e: Evidence, dir: Path): String {
         check(TrustedGitCheckoutGuard.accepts(e.coding.workspace))
         val head=probe.read(listOf(git.toString(),"--git-dir=${e.coding.workspace.resolve(".git")}","rev-parse","HEAD"),e.coding.workspace)
         check(head is ProbeProcessResult.Exited && head.exitCode==0 && head.output.trim()==expectedBase)
@@ -295,12 +298,15 @@ internal class DraftPrPublisher(
         command(e.candidate.filesDirectory,listOf("--git-dir=${dir.resolve("objects.git")}",
             "--work-tree=${e.candidate.filesDirectory}","-c","core.hooksPath=/dev/null","add","--force","--all","--","."))
         check(local(dir,"write-tree")==e.candidate.binding.candidateTree && e.candidate.isIntact())
+        val bytecode=local(dir,"ls-files").lineSequence().filter { it.isNotBlank() && isUnpublishedPythonBytecode(it) }.toList()
+        for (path in bytecode) local(dir,"rm","--cached","--",path)
+        return local(dir,"write-tree")
     }
     private fun localCommit(plan: PublicationPlan): PublicationReadBack.Commit {
         val dir=publisherRoot.resolve(plan.workflowId)
-        check(local(dir,"cat-file","commit",plan.commitSha)==commitBytes(plan.candidateTree,plan.workflowId,
-            plan.candidateId,plan.candidateManifestSha256).toString(Charsets.UTF_8).trim())
-        return PublicationReadBack.Commit(plan.commitSha,plan.candidateTree,listOf(expectedBase))
+        check(local(dir,"cat-file","commit",plan.commitSha)==commitBytes(plan.commitTree,plan.workflowId,
+            plan.candidateId,plan.candidateManifestSha256,plan.commitTime).toString(Charsets.UTF_8).trim())
+        return PublicationReadBack.Commit(plan.commitSha,plan.commitTree,listOf(expectedBase))
     }
     private fun remotePush(plan: PublicationPlan): PublicationReadBack.Push {
         api.checkBase(plan)
@@ -335,10 +341,12 @@ internal class DraftPrPublisher(
         check(result is ProbeProcessResult.Exited && result.exitCode==0)
         return result.output.trim()
     }
-    private fun commitBytes(tree: String,workflow: String,candidate: String,manifest: String): ByteArray =
-        ("tree $tree\nparent $expectedBase\nauthor DevOrchestrator <devorchestrator@users.noreply.github.com> 0 +0000\n"+
-            "committer DevOrchestrator <devorchestrator@users.noreply.github.com> 0 +0000\n\n"+
+    private fun commitBytes(tree: String,workflow: String,candidate: String,manifest: String,commitTime: Long): ByteArray {
+        require(commitTime > 0)
+        return ("tree $tree\nparent $expectedBase\nauthor DevOrchestrator <devorchestrator@users.noreply.github.com> $commitTime +0000\n"+
+            "committer DevOrchestrator <devorchestrator@users.noreply.github.com> $commitTime +0000\n\n"+
             "Implement Issue #$issueNumber\n\nWorkflow: $workflow\nCandidate: $candidate\nManifest: $manifest\n").toByteArray(Charsets.UTF_8)
+    }
     private fun objectId(bytes: ByteArray): String = MessageDigest.getInstance("SHA-1")
         .digest("commit ${bytes.size}\u0000".toByteArray()+bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun canonical(p: Path) { check(p.isAbsolute && p.normalize()==p && p.toRealPath()==p && Files.isDirectory(p,NOFOLLOW_LINKS)) }

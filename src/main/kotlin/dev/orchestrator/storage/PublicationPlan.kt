@@ -20,6 +20,10 @@ internal data class PublicationPlan(
     val generation: Int,
     val policyVersion: Long,
     val workflowVersion: Long,
+    /** Git tree actually committed. Bytecode paths are absent; otherwise this is [candidateTree]. */
+    val commitTree: String = candidateTree,
+    /** Unix seconds for both author and committer. Zero is only a legacy plan that predates real timestamps. */
+    val commitTime: Long = 0,
 ) {
     // URL-safe encoding is injective and contains no '.' or '/' ref hazards, even
     // for valid workflow IDs ending in '.'/'.lock' or containing '..'. No truncation.
@@ -37,7 +41,8 @@ internal data class PublicationPlan(
         require(baseBranch.length in 1..200 && baseBranch.matches(Regex("[A-Za-z0-9][A-Za-z0-9._/-]*")))
         require(baseBranch.split('/').none { it.isEmpty() || it.startsWith('.') || it.endsWith('.') || it.endsWith(".lock") })
         require(!baseBranch.contains(".."))
-        listOf(baseSha,commitSha,candidateTree).forEach { require(it.matches(Regex("[0-9a-f]{40}"))) }
+        listOf(baseSha,commitSha,candidateTree,commitTree).forEach { require(it.matches(Regex("[0-9a-f]{40}"))) }
+        require(commitTime >= 0)
         require(candidateManifestSha256.matches(Regex("[0-9a-f]{64}")))
         require(headBranch != baseBranch)
     }
@@ -66,7 +71,7 @@ internal data class DraftPullRequest(
 internal object PublicationReceiptMatcher {
     fun matches(plan: PublicationPlan, kind: EffectKind, receipt: PublicationReadBack): Boolean = when (kind) {
         EffectKind.COMMIT -> receipt is PublicationReadBack.Commit && receipt.commitSha == plan.commitSha &&
-            receipt.tree == plan.candidateTree && receipt.parents == listOf(plan.baseSha)
+            receipt.tree == plan.commitTree && receipt.parents == listOf(plan.baseSha)
         EffectKind.PUSH -> receipt is PublicationReadBack.Push && receipt.repositoryId == plan.repositoryId &&
             receipt.fullName == "${plan.owner}/${plan.repository}" && receipt.branch == plan.headBranch &&
             receipt.commitSha == plan.commitSha
