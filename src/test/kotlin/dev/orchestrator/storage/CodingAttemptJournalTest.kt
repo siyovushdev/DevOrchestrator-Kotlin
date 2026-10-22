@@ -100,6 +100,18 @@ class CodingAttemptJournalTest {
         assertEquals(AttemptState.PLANNED,journal.find("attempt-1")?.state)
     }
 
+    @Test fun `hold during an existing write joins that transaction`() {
+        val (store, clone) = setup()
+        val journal = CodingAttemptJournal(database)
+        assertNotNull(journal.plan(1, 1, 0, "attempt-1", clone, tree))
+        assertTrue(journal.markStarting("attempt-1"))
+        val restarted = CodingAttemptJournal(database)
+        RuntimeDatabase(database).write { restarted.holdUnreconciledStarts() }
+        assertEquals(AttemptState.UNKNOWN, restarted.find("attempt-1")?.state)
+        assertEquals(WorkflowHold.NEEDS_OWNER, store.findWorkflow(1, 1)?.hold)
+        assertEquals("UNRECONCILED_CODING_START", store.findWorkflow(1, 1)?.holdReason)
+    }
+
     @Test fun unknownRetainsClaimsAndBlocksOnlyAffectedResourcesWithoutRetry() {
         val (store,clone) = setup()
         val journal = CodingAttemptJournal(database)

@@ -124,6 +124,23 @@ class CursorCliStageTest {
         assertEquals("review", progress.stage, progress.reason)
         assertEquals(1, Files.readAllLines(log).size)
         assertEquals("FINISHED", db.read { c -> c.rows("SELECT state FROM cli_stage_runs WHERE attempt_id=?", reviewId) { it.getString(1) }.single() })
+        world.runtime.recover(world.issue)
+        assertEquals("SUCCEEDED", db.read { c -> c.rows("SELECT state FROM agent_attempts WHERE attempt_id=?", reviewId) { it.getString(1) }.single() })
+        assertEquals(1, db.read { c -> c.rows("SELECT 1 FROM agent_attempts WHERE role='REVIEW'") { 1 }.size })
+        assertEquals("READY_FOR_PR", db.read { c -> c.rows("SELECT phase FROM workflows") { it.getString(1) }.single() })
+    }
+
+    @Test fun `recover inside an open write holds an unfinished coding start and does not launch review`() {
+        val cli = fixture()
+        val world = runtime(cli, null)
+        world.runtime.prepare(world.issue)
+        val db = RuntimeDatabase(world.task.resolve("run.db"))
+        db.write { c -> c.mutate("UPDATE agent_attempts SET state='STARTING' WHERE role='CODING'") }
+        world.runtime.recover(world.issue)
+        assertEquals(listOf("CODING" to "UNKNOWN"), db.read { c ->
+            c.rows("SELECT role, state FROM agent_attempts ORDER BY role") { it.getString(1) to it.getString(2) }
+        })
+        assertEquals("UNRECONCILED_CODING_START", db.read { c -> c.rows("SELECT hold_reason FROM workflows") { it.getString(1) }.single() })
     }
 
     @Test fun `a review without a verdict holds and does not spawn another reviewer`() {
