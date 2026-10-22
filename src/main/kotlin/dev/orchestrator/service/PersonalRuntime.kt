@@ -24,6 +24,8 @@ internal interface TaskRuntime {
     fun recover(issue: GitHubIssueRecord)
     fun step(issue: GitHubIssueRecord): TaskProgress
     fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume = ReviewResume.NOT_APPLICABLE
+    /** True only when a succeeded review is already waiting for the single Draft PR. */
+    fun publicationReady(issue: GitHubIssueRecord): Boolean = false
     fun cancel(issue: GitHubIssueRecord): TaskProgress = TaskProgress("cancelled", reason="NOT_STARTED")
     fun summary(issue: GitHubIssueRecord): String = ""
     fun checkRemote(issue: GitHubIssueRecord,id: String): String = error("REMOTE_DISABLED")
@@ -218,6 +220,19 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             }
         }
     } catch (_: Exception) { "Отчёт: сохранённые итоги не прочитаны. Сырые логи не публикуются." }
+    override fun publicationReady(issue: GitHubIssueRecord): Boolean {
+        val dbFile = database(issue)
+        if (!Files.isRegularFile(dbFile)) return false
+        val workflow = SqliteTaskStore(dbFile).findWorkflow(repo, issue.issueNumber) ?: return false
+        if (workflow.phase != WorkflowPhase.READY_FOR_PR || workflow.hold != WorkflowHold.NONE) return false
+        return RuntimeDatabase(dbFile).read { c ->
+            val states = c.rows("SELECT state FROM agent_attempts WHERE workflow_id=? AND role='REVIEW'", workflow.id) { it.getString(1) }
+            val open = states.any { it in setOf("PLANNED", "STARTING", "RUNNING") }
+            val hasCli = c.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cli_stage_runs'") { 1 }.isNotEmpty()
+            val launching = hasCli && c.rows("SELECT 1 FROM cli_stage_runs WHERE workflow_id=? AND state='LAUNCHING'", workflow.id) { 1 }.isNotEmpty()
+            states.any { it == "SUCCEEDED" } && !open && !launching
+        }
+    }
     override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume {
         if (cli == null || !Files.isRegularFile(database(issue))) return ReviewResume.NOT_APPLICABLE
         return engine(issue).resumeCliReview(issue.issueNumber)

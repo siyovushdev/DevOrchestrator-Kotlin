@@ -125,8 +125,14 @@ internal fun readLocalServiceStatus(database: Path): String {
         if (!table("personal_tasks")) return describeOwnerControls(database).ifBlank { "No tasks" }
         val failures=c.createStatement().use { statement ->
             val exists=statement.executeQuery("SELECT 1 FROM sqlite_master WHERE name='personal_failures'").use { it.next() }
-            if (exists) statement.executeQuery("SELECT diagnostic FROM personal_failures ORDER BY id").use { r ->
-                buildList { while(r.next()) add("SERVICE_STOPPED_REQUIRES_OWNER: ${r.getString(1)}") }.joinToString("\n")
+            if (exists) {
+                val audited=statement.executeQuery("SELECT 1 FROM sqlite_master WHERE name='personal_failure_audit'").use { it.next() }
+                val sql=if (audited) """SELECT f.diagnostic FROM personal_failures f
+                    WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id) ORDER BY f.id"""
+                    else "SELECT diagnostic FROM personal_failures ORDER BY id"
+                statement.executeQuery(sql).use { r ->
+                    buildList { while(r.next()) add("SERVICE_STOPPED_REQUIRES_OWNER: ${r.getString(1)}") }.joinToString("\n")
+                }
             } else ""
         }
         val tasks=c.createStatement().use { statement ->
@@ -214,7 +220,8 @@ internal fun checkSavedStatus(database: Path, github: ServiceGitHub, number: Int
             WHERE t.number=? AND s.stage=? AND
             ((t.state='held' AND t.reason='STATUS_OUTCOME_UNKNOWN' AND s.state='uncertain') OR
              (s.state='sending' AND t.state IN ('accepted','active','done')))
-            AND NOT EXISTS(SELECT 1 FROM personal_failures)""").use { query ->
+            AND NOT EXISTS(SELECT 1 FROM personal_failures f
+                WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id))""").use { query ->
             query.setInt(1,number); query.setString(2,stage)
             query.executeQuery().use { rows ->
                 if (!rows.next()) return@use null

@@ -23,6 +23,7 @@ class PersonalServiceTest {
     private var crashStep=false
     private var progress=TaskProgress("tests")
     private var resume=ReviewResume.NOT_APPLICABLE
+    private var ready=false
     private var resumes=0
     private var records=listOf(issue())
     private val github=object: ServiceGitHub {
@@ -37,9 +38,49 @@ class PersonalServiceTest {
         override fun recover(issue: GitHubIssueRecord) { recoveries++ }
         override fun step(issue: GitHubIssueRecord): TaskProgress { steps++; if(crashStep) throw SimulatedCrash(); return progress }
         override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume { resumes++; return resume }
+        override fun publicationReady(issue: GitHubIssueRecord)=ready
     }
     private class SimulatedCrash: Error()
     private fun service()=PersonalService(database,github,runtime,{enabled})
+    @Test fun `a stored nested recover failure is acknowledged and publication continues`() {
+        val nested="org.sqlite.SQLiteException [dev.orchestrator.storage.RuntimeDatabase.write:15, dev.orchestrator.storage.CodingAttemptJournal.holdUnreconciledStarts:192, dev.orchestrator.profile.CursorCliWorkflowBridge.recover\$lambda\$0:71, dev.orchestrator.storage.RuntimeDatabase.write:17]"
+        assertEquals("ACTIVE", service().tick())
+        RuntimeDatabase(database).write { c ->
+            c.mutate("UPDATE personal_tasks SET state='active', stage='review', reason=NULL")
+            c.mutate("INSERT INTO personal_failures(recorded_at, diagnostic) VALUES ('t', ?)", nested)
+        }
+        ready=true
+        progress=TaskProgress("done", "https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/9")
+        val restarted=service()
+        restarted.recover()
+        assertEquals(1, recoveries)
+        assertEquals("DONE", restarted.tick())
+        assertEquals(1, steps)
+        val kept=RuntimeDatabase(database).read { c -> c.rows("SELECT id, diagnostic FROM personal_failures") { it.getLong(1) to it.getString(2) } }
+        assertEquals(1, kept.size)
+        assertTrue(kept.single().second.contains("holdUnreconciledStarts"))
+        val audit=RuntimeDatabase(database).read { c -> c.rows("SELECT failure_id, actor, evidence FROM personal_failure_audit") { Triple(it.getLong(1), it.getString(2), it.getString(3)) } }
+        assertEquals(kept.single().first, audit.single().first)
+        assertEquals("controller:ready-pr", audit.single().second)
+        assertTrue(audit.single().third.contains("READY_FOR_PR"))
+        RuntimeDatabase(database).write { c -> c.mutate("INSERT INTO personal_failures(recorded_at, diagnostic) VALUES ('t2', 'UNKNOWN_NEW_FAILURE')") }
+        assertFailsWith<ServiceStopped> { service().tick() }
+        assertEquals(1, steps)
+    }
+
+    @Test fun `a nested recover failure stays stopped when the task is not ready to publish`() {
+        service().tick()
+        RuntimeDatabase(database).write { c ->
+            c.mutate("INSERT INTO personal_failures(recorded_at, diagnostic) VALUES ('t', ?)",
+                "org.sqlite.SQLiteException [RuntimeDatabase.write, CodingAttemptJournal.holdUnreconciledStarts, CursorCliWorkflowBridge.recover]")
+        }
+        ready=false
+        assertFailsWith<ServiceStopped> { service().recover() }
+        assertEquals(0, recoveries)
+        assertEquals(0, RuntimeDatabase(database).read { c -> c.rows("SELECT 1 FROM personal_failure_audit") { 1 }.size })
+        assertEquals(1, RuntimeDatabase(database).read { c -> c.rows("SELECT 1 FROM personal_failures") { 1 }.size })
+    }
+
     @Test fun `an internal review parse hold is imported on the next tick without release`() {
         val s=service(); assertEquals("ACTIVE", s.tick())
         RuntimeDatabase(database).write { c ->

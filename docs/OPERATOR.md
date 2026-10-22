@@ -116,7 +116,10 @@ dev-orchestrator-kotlin service /absolute/personal.properties
 ## Восстановление
 
 Не удалять `service.db`, `task-*`, holds и артефакты, чтобы «начать заново».
-`status` читает SQLite без сети. Если там `SERVICE_STOPPED_REQUIRES_OWNER` или
+`status` читает SQLite без сети. Если там неподтверждённый `SERVICE_STOPPED_REQUIRES_OWNER` или
 `NEEDS_OWNER`, автоматического продолжения нет: сверить процесс, GitHub и локальный
-статус, затем только точную команду сверки. Второй процесс с тем же корнем не стартует
-из-за `service.lock`.
+статус, затем только точную команду сверки. Уже сохранённый сбой вложенной записи `recover`,
+когда reviewer уже `SUCCEEDED` и фаза `READY_FOR_PR`, остаётся в `personal_failures` и
+отмечается в `personal_failure_audit`. Этот запуск доходит до одного Draft PR и не
+запускает второго reviewer. Новая неизвестная ошибка по-прежнему останавливает сервис.
+Второй процесс с тем же корнем не стартует из-за `service.lock`.

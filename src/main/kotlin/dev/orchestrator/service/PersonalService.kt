@@ -42,6 +42,12 @@ internal class PersonalService(private val file: Path, private val github: Servi
             recorded_at TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL)""")
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_failures(
             id INTEGER PRIMARY KEY, recorded_at TEXT NOT NULL, diagnostic TEXT NOT NULL)""")
+        c.mutate("""CREATE TABLE IF NOT EXISTS personal_failure_audit(
+            id INTEGER PRIMARY KEY,
+            failure_id INTEGER NOT NULL UNIQUE REFERENCES personal_failures(id),
+            recorded_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            evidence TEXT NOT NULL)""")
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_exclusions(
             issue_id INTEGER PRIMARY KEY, number INTEGER NOT NULL UNIQUE,
             recorded_at TEXT NOT NULL, detail TEXT NOT NULL)""")
@@ -53,9 +59,36 @@ internal class PersonalService(private val file: Path, private val github: Servi
         return diagnostic
     }
     private fun requireHealthy() {
-        val failure=db.read { it.rows("SELECT diagnostic FROM personal_failures ORDER BY id LIMIT 1") { it.getString(1) }.singleOrNull() }
+        val failure=db.read { it.rows("""SELECT f.diagnostic FROM personal_failures f
+            WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id)
+            ORDER BY f.id LIMIT 1""") { it.getString(1) }.singleOrNull() }
         if (failure!=null) throw ServiceStopped("SERVICE_STOPPED_REQUIRES_OWNER: $failure")
     }
+    /** The stored nested-write crash stays. A ready Draft PR may continue; any other open failure still stops. */
+    private fun acknowledgeRecoveredPublication() {
+        val open=db.read { c -> c.rows("""SELECT f.id, f.diagnostic FROM personal_failures f
+            WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id)
+            ORDER BY f.id""") { it.getLong(1) to it.getString(2) } }
+        if (open.isEmpty() || open.any { !nestedRecoverWrite(it.second) }) return
+        val ready=tasks().filter { it.state=="active" && runtime.publicationReady(it.issue) }
+        if (ready.isEmpty()) return
+        val evidence=mapper.writeValueAsString(mapOf(
+            "reason" to "READY_FOR_PR",
+            "issues" to ready.map { it.issue.githubIssueId },
+            "review" to "SUCCEEDED",
+        ))
+        val now=Instant.now().toString()
+        db.write { c ->
+            for ((id, _) in open) c.mutate(
+                """INSERT OR IGNORE INTO personal_failure_audit(failure_id,recorded_at,actor,evidence) VALUES (?,?,?,?)""",
+                id, now, "controller:ready-pr", evidence,
+            )
+        }
+    }
+    private fun nestedRecoverWrite(diagnostic: String): Boolean =
+        diagnostic.contains("SQLiteException") &&
+            diagnostic.contains("holdUnreconciledStarts") &&
+            diagnostic.contains("CursorCliWorkflowBridge.recover")
     private data class Task(val issue: GitHubIssueRecord,val state: String,val stage: String,val url: String?,val reason: String?)
     private fun tasks(): List<Task> = db.read { c -> c.rows("SELECT source,state,stage,url,reason FROM personal_tasks ORDER BY number") {
         val n=mapper.readTree(it.getString(1))
@@ -97,6 +130,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
     }
     private val terminalStages=setOf("cancelled","cancel-refused","released","timed_out","unattested")
     fun recover() {
+        acknowledgeRecoveredPublication()
         resumeInterruptedReview()
         requireHealthy()
         for(t in tasks()) {
@@ -111,6 +145,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
         }
     }
     fun tick(): String {
+        acknowledgeRecoveredPublication()
         resumeInterruptedReview()
         requireHealthy()
         if(!permitted()) return "OFF"
