@@ -28,19 +28,16 @@ internal object CodexAttestation {
             usage.path("output_tokens").isIntegralNumber
     } catch (_: Exception) { false }
 
-    /** Usage JSON alone is not attestation. The worker must have measured an ELF binary. */
-    fun guestBinary(result: com.fasterxml.jackson.databind.JsonNode): Boolean {
-        val bin = result.path("codexBinary")
-        val sha = bin.path("sha256").asText("")
-        return bin.path("elf").asBoolean(false) && bin.path("size").asLong(0) >= 1_000_000 &&
-            sha.matches(Regex("[0-9a-f]{64}"))
-    }
+    /** Reads the configured binary here. A guest JSON object is not a measurement. */
+    fun measure(path: Path): dev.orchestrator.remote.MeasuredBinary? = try {
+        java.nio.file.Files.newInputStream(path, NOFOLLOW_LINKS).use { dev.orchestrator.remote.measureStream(it) }
+    } catch (_: Exception) { null }
 }
 
 /**
  * No-inference probe. The artificial file is not a controller or GitHub secret.
- * Success is a write denied outside the workspace and, for Coding, a write inside it.
- * A consistent workspace sandbox and the SSH deny-root profile can both pass.
+ * Success is an unchanged host secret after a tamper attempt and, for Coding, a write inside the workspace.
+ * A sandbox may absorb the write without touching the host file. A consistent workspace sandbox and the SSH deny-root profile can both pass.
  * The marker stays inside the workspace; fixtureCli is not required.
  */
 internal object LocalSecretCanary {
@@ -55,7 +52,7 @@ internal object LocalSecretCanary {
         val run = Files.createDirectories(workspace.resolve(".devorch-canary-run"))
         val script = "from pathlib import Path\n" +
             "secret=Path(" + ObjectMapper().writeValueAsString(canary.toString()) + ")\n" +
-            "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\nelse:\n raise SystemExit(91)\n" +
+            "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\n" +
             "marker=Path(" + ObjectMapper().writeValueAsString(marker.toString()) + ")\n" +
             "wrote=False\ntry:\n marker.write_text('ok')\n wrote=True\nexcept OSError:\n pass\n" +
             "if " + (if (writable) "not wrote" else "wrote") + ":\n raise SystemExit(94)\n"

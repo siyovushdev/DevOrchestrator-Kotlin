@@ -59,8 +59,8 @@ def run(config):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    # Only the controller-owned supervisor should die with its parent. The SSH
-    # guest calls this same function and must survive a dropped serve process.
+    # Local NativeProcessRunner sets this so the supervisor dies with the JVM.
+    # The SSH guest arms parent death in execute(); this function does not.
     if os.environ.get("DEVORCH_DIE_WITH_PARENT") == "1":
         if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "parent-death signal unavailable")
@@ -73,6 +73,7 @@ def run(config):
             raise ValueError("Unsupported private environment")
         environment[name] = os.environ[name]
     def die_with_parent():
+        # Direct child only. A sandbox grandchild does not inherit this signal.
         libc.prctl(1, signal.SIGKILL, 0, 0, 0)
     child = subprocess.Popen(config["argv"], cwd=config["cwd"], env=environment,
                              start_new_session=True, preexec_fn=die_with_parent)

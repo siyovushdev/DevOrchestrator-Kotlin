@@ -85,7 +85,9 @@ print('{"type":"turn.completed"}')
         assertTrue(proc.waitFor(5, TimeUnit.SECONDS) && proc.exitValue()==0, out)
         assertFalse(sleep.isAlive)
         assertTrue(java.nio.file.Files.exists(attempt.resolve("cancel.request")))
-        assertFalse(java.nio.file.Files.exists(attempt.resolve("result.json")))
+        val terminal=java.nio.file.Files.readString(attempt.resolve("result.json"))
+        assertTrue(terminal.contains("CANCELLED"))
+        assertFalse(terminal.contains("FINISHED"))
         assertTrue(out.contains("CANCEL_REQUESTED"))
     }
     @Test fun remoteStageDeadlineMatchesTheFiniteOperatorCeiling() {
@@ -161,6 +163,73 @@ print('{"type":"turn.completed"}')
         assertEquals("FINISHED",RemoteProtocol.mapper.readTree(result)["state"].asText())
         assertEquals(1,Files.readAllLines(calls).size)
     }
+    @Test fun controllerSigkillKillsTheSshClientAndTheGuest() {
+        setup("import time; time.sleep(60)")
+        val r=request(timeout=20000)
+        val wireFile=temp.resolve("wire.bin")
+        Files.write(wireFile, wire(r))
+        val launcher=temp.resolve("parent-death.py")
+        Files.writeString(launcher, WorkerWireProcess.PARENT_DEATH)
+        val pidFile=temp.resolve("controller.pids")
+        val errorFile=temp.resolve("controller.err")
+        val script=temp.resolve("ssh-client-controller.py")
+        Files.writeString(script, """
+import os, subprocess, sys, time
+from pathlib import Path
+worker, config, wirefile, pidfile, launcher = sys.argv[1:6]
+wire = Path(wirefile).read_bytes()
+if not wire.endswith(b"\n"):
+    wire += b"\n"
+launcher_src = Path(launcher).read_text()
+in_r, in_w = os.pipe()
+out_r, out_w = os.pipe()
+serve_err = open(str(Path(pidfile).with_suffix(".serve-err")), "wb")
+serve = subprocess.Popen(["/usr/bin/python3","-I","-S", worker, "serve", config],
+    stdin=in_r, stdout=out_w, stderr=serve_err, start_new_session=True, close_fds=True)
+os.close(in_r); os.close(out_w)
+os.write(in_w, wire); os.close(in_w)
+hold = subprocess.Popen(["/usr/bin/python3","-I","-S","-c", launcher_src, "/bin/sleep", "120"],
+    pass_fds=(out_r,), close_fds=True)
+os.close(out_r)
+Path(pidfile).write_text(f"{os.getpid()} {serve.pid} {hold.pid}\n")
+time.sleep(180)
+""".trimIndent())
+        val controller=ProcessBuilder("/usr/bin/python3","-I","-S", script.toString(), worker.toString(), config.toString(),
+            wireFile.toString(), pidFile.toString(), launcher.toString())
+            .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(errorFile.toFile()).start()
+        val binary=RemoteProtocol.mapper.readTree(Files.readAllBytes(config))["codex"].asText()
+        val deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20)
+        var guest=0L
+        while(System.nanoTime()<deadline && guest==0L) {
+            val found=pidsContaining(binary).filter { pid ->
+                pid != controller.pid() && try { Files.readString(Path.of("/proc/$pid/cmdline")).contains("exec") } catch (_: Exception) { false }
+            }
+            if(found.size==1 && Files.exists(Path.of("/proc/${found.single()}"))) guest=found.single()
+            else Thread.sleep(50)
+        }
+        assertTrue(guest>1, "guest did not start\n"+(if(Files.exists(errorFile)) Files.readString(errorFile) else "")+
+            (if(Files.exists(pidFile.resolveSibling("controller.serve-err"))) Files.readString(pidFile.resolveSibling("controller.serve-err")) else ""))
+        val ids=Files.readString(pidFile).trim().split(" ").map { it.toLong() }
+        val servePid=ids[1]; val clientPid=ids[2]
+        val guestParent=parentPid(guest)
+        assertNotEquals(controller.pid(), guestParent)
+        assertNotEquals(sessionId(controller.pid()), sessionId(servePid))
+        ProcessHandle.of(controller.pid()).ifPresent { it.destroyForcibly() }
+        val dead=System.nanoTime()+TimeUnit.SECONDS.toNanos(8)
+        while(System.nanoTime()<dead && (alive(guest) || alive(clientPid))) Thread.sleep(50)
+        assertFalse(alive(guest), "guest still running after controller SIGKILL")
+        assertFalse(alive(clientPid), "ssh client still running after controller SIGKILL")
+        assertFalse(alive(controller.pid()))
+        val marked=System.nanoTime()+TimeUnit.SECONDS.toNanos(5)
+        var terminal=""
+        while(System.nanoTime()<marked && terminal.isEmpty()) {
+            val path=root.resolve("a1/result.json")
+            if(Files.exists(path)) terminal=Files.readString(path) else Thread.sleep(50)
+        }
+        assertTrue(terminal.contains("CLIENT_DEAD"), terminal)
+        val second=client().submit(request(attempt="a2", workflow="w2", timeout=500)) { true }
+        assertEquals("TIMEOUT", second)
+    }
     @Test fun lostSshKillsTheGuestInsteadOfLeavingItRunning() {
         setup("import time; time.sleep(30)")
         val r=request(timeout=4000); val j=journal()
@@ -177,18 +246,53 @@ print('{"type":"turn.completed"}')
     }
     @Test fun sshStageTimeoutIsTimeoutNotAHeldSuccess() {
         setup("import time; time.sleep(5)")
-        val state=client().submit(request(timeout=300)) { true }
+        val j=journal()
+        val state=client(j).submit(request(timeout=300)) { true }
         assertEquals("TIMEOUT", state)
-        assertFalse(Files.exists(root.resolve("a1/result.json")))
+        val terminal=Files.readString(root.resolve("a1/result.json"))
+        assertTrue(terminal.contains("TIMEOUT"))
+        assertFalse(terminal.contains("FINISHED"))
         assertTrue(Files.readString(root.resolve("a1/failure.json")).contains("STAGE_TIMEOUT"))
+        val second=client(j).submit(request(attempt="a2", workflow="w2", timeout=500)) { true }
+        assertEquals("TIMEOUT", second)
     }
-    @Test fun forgedUsageJsonIsNotCodexAttestation() {
-        val usageOnly=RemoteProtocol.mapper.readTree("""{"usage":{"input_tokens":1,"output_tokens":1}}""")
-        assertFalse(dev.orchestrator.agent.nativecli.CodexAttestation.guestBinary(usageOnly))
-        val script=RemoteProtocol.mapper.readTree("""{"codexBinary":{"elf":false,"size":40,"sha256":"${"ab".repeat(32)}"}}""")
-        assertFalse(dev.orchestrator.agent.nativecli.CodexAttestation.guestBinary(script))
-        val elf=RemoteProtocol.mapper.readTree("""{"codexBinary":{"elf":true,"size":2000000,"sha256":"${"cd".repeat(32)}"}}""")
-        assertTrue(dev.orchestrator.agent.nativecli.CodexAttestation.guestBinary(elf))
+    @Test fun uncertainFailureStillBlocksTheNextIssue() {
+        setup()
+        val attempt=root.resolve("stuck"); Files.createDirectory(attempt)
+        val saved=request(attempt="stuck")
+        Files.write(attempt.resolve("request.json"), saved.bytes)
+        Files.writeString(attempt.resolve("failure.json"), """{"state":"UNKNOWN","code":"EXECUTION_OR_EVIDENCE_FAILED"}""")
+        assertEquals("UNKNOWN", client().submit(request(attempt="a2", workflow="w2", timeout=500)) { true })
+        assertFalse(Files.exists(root.resolve("a2")))
+        assertFalse(Files.exists(calls))
+    }
+    @Test fun forgedGuestBinaryIsNotControllerMeasurement() {
+        setup()
+        val r=request()
+        val bytes=transport().exchange(wire(r),18000)
+        val honest=RemoteProtocol.mapper.readTree(bytes)
+        assertFalse(honest.has("codexBinary"))
+        RemoteEvidence(scratch).check(r, bytes)
+        val forged=honest.deepCopy<ObjectNode>()
+        forged.set<ObjectNode>("codexBinary", RemoteProtocol.mapper.readTree(
+            """{"elf":true,"size":2000000,"sha256":"${"ab".repeat(32)}"}"""))
+        assertFails { RemoteEvidence(scratch).check(r, RemoteProtocol.mapper.writeValueAsBytes(forged)) }
+        val binary=Path.of(RemoteProtocol.mapper.readTree(Files.readAllBytes(config))["codex"].asText())
+        val measuredScript=dev.orchestrator.agent.nativecli.CodexAttestation.measure(binary)
+        assertNotNull(measuredScript)
+        assertFalse(measuredScript.attested)
+        val elf=temp.resolve("measured-elf")
+        val body=ByteArray(1_000_000)
+        body[0]=0x7f; body[1]='E'.code.toByte(); body[2]='L'.code.toByte(); body[3]='F'.code.toByte()
+        Files.write(elf, body)
+        val measured=dev.orchestrator.agent.nativecli.CodexAttestation.measure(elf)
+        assertNotNull(measured)
+        assertTrue(measured.attested)
+        assertEquals(RemoteProtocol.digest(body), measured.sha256)
+        val command=remoteCodexMeasureCommand(Path.of("/home/vboxuser/.local/bin/codex"))
+        assertFalse(command.contains("ssh-vm-worker"))
+        assertFalse(command.contains("codexBinary"))
+        assertTrue(command.contains("/home/vboxuser/.local/bin/codex"))
     }
     @Test fun neverSentUnknownAndOwnerDenialDoNotAuthorizeReplayOrOtherSlot() {
         setup(); val j=journal(); val r=request(); var calls=0
@@ -410,5 +514,29 @@ print('NATIVE_PERMISSION_CANARY_PASS_NO_INFERENCE')
         assertFails { WorkerWireProcess.exchange(listOf("/usr/bin/python3","-I",script.toString()),"{}".toByteArray(),100) }
         Files.writeString(script,"import sys; sys.stdin.buffer.readline(); sys.stdout.write('x'*(24*1024*1024+1))")
         assertFails { WorkerWireProcess.exchange(listOf("/usr/bin/python3","-I",script.toString()),"{}".toByteArray(),3000) }
+    }
+
+    private fun pidsContaining(text: String): List<Long> {
+        val found=mutableListOf<Long>()
+        Files.newDirectoryStream(Path.of("/proc")).use { dirs ->
+            for (dir in dirs) {
+                val name=dir.fileName.toString()
+                if (name.isEmpty() || name.any { !it.isDigit() }) continue
+                val cmd=try { Files.readString(dir.resolve("cmdline")) } catch (_: Exception) { continue }
+                if (cmd.contains(text)) found.add(name.toLong())
+            }
+        }
+        return found
+    }
+    private fun statFields(pid: Long): List<String> {
+        val stat=Files.readString(Path.of("/proc/$pid/stat"))
+        return stat.substringAfterLast(')').trim().split(Regex("\\s+"))
+    }
+    private fun parentPid(pid: Long)=statFields(pid)[1].toLong()
+    private fun sessionId(pid: Long)=statFields(pid)[3].toLong()
+    private fun alive(pid: Long): Boolean {
+        if (!Files.exists(Path.of("/proc/$pid"))) return false
+        val state=try { statFields(pid)[0] } catch (_: Exception) { return false }
+        return state!="Z"
     }
 }

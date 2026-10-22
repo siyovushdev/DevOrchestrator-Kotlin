@@ -13,10 +13,12 @@ import os
 from pathlib import Path
 import re
 import resource
+import select
 import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 LIMIT = 24 * 1024 * 1024
@@ -283,9 +285,12 @@ def native_policy(c, source, attempt, role, supervisor):
     # Exact-file tests, not globs. A read-only profile must also deny source writes.
     probe = source / ('devorch-policy-probe-' + os.urandom(12).hex())
     write(probe, b'public-source-probe')
+    # Do not treat a sandboxed write as success or failure by itself. Codex can
+    # absorb the syscall inside the mount while the host file stays unchanged.
+    # The caller checks the host bytes. Exit 91 here made that profile fail closed.
     script = ("from pathlib import Path\n"
               "secret=Path(" + repr(str(canary)) + ")\n"
-              "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\nelse:\n raise SystemExit(91)\n"
+              "try:\n secret.write_bytes(b'tamper')\nexcept OSError:\n pass\n"
               "for text in " + repr([str(attempt / 'request.json'), str(INSTALL / 'ssh-vm-worker.py'),
                                     '/proc/' + str(os.getpid()) + '/environ']) + ":\n"
               " p=Path(text)\n"
@@ -310,11 +315,66 @@ def native_policy(c, source, attempt, role, supervisor):
         os.dup2(output.fileno(), 2)
         raw = supervisor.run({'argv': argv, 'cwd': str(source), 'env': child_env,
                               'timeout_ms': 10000, 'namespace_boundary': True})
+        try:
+            os.write(1, ('policy-exit %s %s\n' % (raw.get('exit_code'), raw.get('cause'))).encode())
+        except OSError:
+            pass
     write(attempt / 'policy-receipt.json', encoded(raw))
     if raw.get('exit_code') != 0 or raw.get('cause') != 'exited' or not raw.get('cleanup_echild') or read(probe, 64) != b'public-source-probe' or read(canary, 64) != b'ARTIFICIAL_POLICY_SECRET':
         raise ValueError('native permission policy not enforced')
     probe.unlink()
     return overrides
+
+
+def kill_process_tree(pid, seen=None):
+    if pid <= 1:
+        return
+    if seen is None:
+        seen = set()
+    if pid in seen:
+        return
+    seen.add(pid)
+    try:
+        children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+    except OSError:
+        children = []
+    for child in children:
+        try:
+            kill_process_tree(int(child), seen)
+        except ValueError:
+            pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def publish_terminal(attempt, state, code):
+    """Timeout and cancel close the claim. A later FINISHED result cannot replace it."""
+    if (attempt / 'result.json').is_file():
+        return
+    payload = encoded({'state': state, 'code': code})
+    for name in ('failure.json', 'result.json'):
+        path = attempt / name
+        if path.exists():
+            continue
+        try:
+            write(path, payload)
+        except OSError:
+            return
+
+
+def closed_claim(previous):
+    if (previous / 'result.json').is_file():
+        return True
+    failure = previous / 'failure.json'
+    if not failure.is_file():
+        return False
+    try:
+        data = load(read(failure, 65536))
+    except (OSError, ValueError):
+        return False
+    return data.get('state') in ('TIMEOUT', 'CANCELLED') or data.get('code') in ('STAGE_TIMEOUT', 'OWNER_CANCEL', 'CLIENT_DEAD')
 
 
 def arm_parent_death():
@@ -375,10 +435,10 @@ def execute(c, attempt):
                                   'timeout_ms': r['timeoutMs'], 'namespace_boundary': role == 'TESTS'})
         write(attempt / 'supervisor.json', encoded(raw))
         if raw and raw.get('cause') == 'timeout':
-            write(attempt / 'failure.json', encoded({'state': 'TIMEOUT', 'code': 'STAGE_TIMEOUT'}))
+            publish_terminal(attempt, 'TIMEOUT', 'STAGE_TIMEOUT')
             return
         if (attempt / 'cancel.request').exists() or (raw and raw.get('cause') == 'stop_requested'):
-            write(attempt / 'failure.json', encoded({'state': 'UNKNOWN', 'code': 'CANCELLED_OR_NOT_EXITED'}))
+            publish_terminal(attempt, 'CANCELLED', 'OWNER_CANCEL')
             return
         if not raw or not raw.get('cleanup_echild'):
             raise ValueError('cleanup not proven')
@@ -392,11 +452,8 @@ def execute(c, attempt):
             if p.exists():
                 data = read(p, 1024 * 1024)
                 artifacts[name] = {'data': base64.b64encode(data).decode(), 'sha256': sha(data)}
-        binary = None
-        if role != 'TESTS':
-            raw_bin = Path(c['codex']).read_bytes()
-            binary = {'elf': raw_bin.startswith(b'\x7fELF'), 'size': len(raw_bin), 'sha256': sha(raw_bin)}
-        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts, 'codexBinary': binary}
+        # The guest does not attest its own binary. The controller measures the file.
+        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts}
         result.update({'version': 1, 'requestSha256': sha(read(attempt / 'request.json')), 'workerSha256': installation_digest(), 'identity': r['identity'], 'started': identity, 'nativePolicyReceipt': load(read(attempt / 'policy-receipt.json')) if role != 'TESTS' else None})
         payload = encoded(result)
         if len(payload) > LIMIT:
@@ -431,8 +488,7 @@ def cancel_guest(root, attempt_id, digest):
                 os.kill(pid, signal.SIGTERM)
         except (OSError, ValueError, KeyError, TypeError):
             pass
-    if not (attempt / 'result.json').exists() and not (attempt / 'failure.json').exists():
-        write(attempt / 'failure.json', encoded({'state': 'UNKNOWN', 'code': 'OWNER_CANCEL'}))
+    publish_terminal(attempt, 'CANCELLED', 'OWNER_CANCEL')
     return {'state': 'CANCEL_REQUESTED'}
 
 
@@ -448,8 +504,9 @@ def query(root, attempt_id, digest):
         return load(read(attempt / 'result.json'))
     if (attempt / 'failure.json').exists():
         failure = load(read(attempt / 'failure.json'))
-        if failure.get('state') == 'TIMEOUT' or failure.get('code') == 'STAGE_TIMEOUT':
-            return {'state': 'TIMEOUT'}
+        if failure.get('state') in ('TIMEOUT', 'CANCELLED') or failure.get('code') in ('STAGE_TIMEOUT', 'OWNER_CANCEL', 'CLIENT_DEAD'):
+            state = failure.get('state') if failure.get('state') in ('TIMEOUT', 'CANCELLED') else 'CANCELLED'
+            return {'state': state, 'code': failure.get('code')}
     result = {'state': 'UNKNOWN'}
     if (attempt / 'started.json').exists():
         started = load(read(attempt / 'started.json'))
@@ -484,26 +541,59 @@ def serve(c, config_path):
         attempt = root / i['attemptId']
         if attempt.exists():
             return query(root, i['attemptId'], sha(data))  # never execute duplicate
-        # A single uncertain claim blocks new work. No blind retry, even after reboot.
+        # An uncertain claim still blocks new work. Timeout and cancel are terminal
+        # even when result.json was not a FINISHED receipt.
         for previous in root.iterdir():
-            if previous.is_dir() and not (previous / 'result.json').is_file():
+            if not previous.is_dir():
+                continue
+            if not closed_claim(previous):
                 return {'state': 'BLOCKED_UNKNOWN'}
-            if previous.is_dir():
+            if not (previous / 'request.json').is_file():
+                continue
+            try:
                 old = load(read(previous / 'request.json'))['identity']
-                if (old['workflowId'], old['role'], old['generation']) == (i['workflowId'], i['role'], i['generation']):
-                    return {'state': 'DUPLICATE_SLOT'}
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if (old['workflowId'], old['role'], old['generation']) == (i['workflowId'], i['role'], i['generation']):
+                return {'state': 'DUPLICATE_SLOT'}
         attempt.mkdir(mode=0o700)
         sync_dir(root)  # persist the claim directory itself before launch
         write(attempt / 'request.json', data)  # fsynced claim BEFORE Popen
         with open(os.devnull, 'rb') as stdin, (attempt / 'launcher.log').open('xb') as output:
-            subprocess.Popen(['/usr/bin/python3', '-I', '-S', str(INSTALL / 'ssh-vm-worker.py'), '_execute',
-                              str(config_path), i['attemptId']], stdin=stdin, stdout=output, stderr=output,
-                             start_new_session=True, close_fds=True, env=env())
-    # Caller may disappear at any point. Detached supervisor keeps the claim/result.
+            guest = subprocess.Popen(['/usr/bin/python3', '-I', '-S', str(INSTALL / 'ssh-vm-worker.py'), '_execute',
+                                      str(config_path), i['attemptId']], stdin=stdin, stdout=output, stderr=output,
+                                     start_new_session=True, close_fds=True, env=env())
+    # Stdin is closed after the request on purpose. The SSH client stays alive
+    # on stdout. POLLHUP there means the client died, including after SIGKILL of
+    # the controller, which kills ssh via PR_SET_PDEATHSIG. pdeathsig on this
+    # process does not see that client.
+    client_dead = []
+
+    def mark_dead(_signum=None, _frame=None):
+        if not client_dead:
+            client_dead.append(True)
+
+    signal.signal(signal.SIGHUP, mark_dead)
+
+    def watch_client():
+        poller = select.poll()
+        try:
+            poller.register(1, select.POLLHUP | select.POLLERR)
+        except (OSError, ValueError):
+            return
+        while not client_dead:
+            if poller.poll(200):
+                mark_dead()
+
+    threading.Thread(target=watch_client, daemon=True).start()
     deadline = time.monotonic() + r['timeoutMs'] / 1000 + 10
     while time.monotonic() < deadline:
+        if client_dead:
+            kill_process_tree(guest.pid)
+            publish_terminal(attempt, 'CANCELLED', 'CLIENT_DEAD')
+            return {'state': 'CANCELLED', 'code': 'CLIENT_DEAD'}
         result = query(root, i['attemptId'], sha(data))
-        if result['state'] == 'FINISHED' or (attempt / 'failure.json').exists():
+        if result.get('state') in ('FINISHED', 'TIMEOUT', 'CANCELLED') or (attempt / 'failure.json').exists():
             return result
         time.sleep(0.05)
     return query(root, i['attemptId'], sha(data))

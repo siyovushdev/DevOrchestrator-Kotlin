@@ -31,7 +31,10 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     private val remoteOverride: RemoteExecutionSettings? = null,
     private val fixtureCli: Boolean = false,
 ) : TaskRuntime {
-    private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { RemoteExecutionSettings(it.peer,SshWorkerTransport(it)) } else null }
+    private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { ssh ->
+        val transport=SshWorkerTransport(ssh)
+        RemoteExecutionSettings(ssh.peer, transport, codexMeasurement={ transport.measure(config.codex) })
+    } else null }
     private val repo=SMOKE_TARGET.repositoryId
     private val mapper=ObjectMapper()
     private fun root(i: GitHubIssueRecord)=config.root.resolve("task-${i.githubIssueId}")

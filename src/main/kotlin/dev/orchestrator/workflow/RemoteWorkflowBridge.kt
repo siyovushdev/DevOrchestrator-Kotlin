@@ -2,7 +2,6 @@ package dev.orchestrator.workflow
 
 import com.fasterxml.jackson.databind.JsonNode
 import dev.orchestrator.agent.*
-import dev.orchestrator.agent.nativecli.CodexAttestation
 import dev.orchestrator.remote.*
 import dev.orchestrator.review.*
 import dev.orchestrator.storage.*
@@ -19,7 +18,8 @@ import java.util.Base64
 
 /** Owner-controlled endpoint identity, independent of Issue/model content. No controller secrets on wire. */
 internal data class RemoteExecutionSettings(val peer: String,val transport: WorkerTransport,
-    val importCheckpoint: (String) -> Unit = {})
+    val importCheckpoint: (String) -> Unit = {},
+    val codexMeasurement: () -> MeasuredBinary? = { null })
 
 /** Phase adapter, not a scheduler. The existing engine still owns phases, corrections and publication. */
 internal class RemoteWorkflowBridge(private val engine: WorkflowEngine,private val settings: RemoteExecutionSettings) {
@@ -205,10 +205,13 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         db.read(::guard)
         evidence.check(request,saved.evidence!!)
         val n=mapper.readTree(saved.evidence); val exit=n["receipt"]["exit_code"].asInt()
-        if(!engine.fixtureCli && role!="TESTS" && !CodexAttestation.guestBinary(n)) {
-            blockImport(id)
-            db.write { c -> engine.hold(c,w.id,"CODEX_NOT_ATTESTED") }
-            return "CODEX_NOT_ATTESTED"
+        if(!engine.fixtureCli && role!="TESTS") {
+            val measured=try { settings.codexMeasurement() } catch(_: Exception) { null }
+            if(measured?.attested!=true) {
+                blockImport(id)
+                db.write { c -> engine.hold(c,w.id,"CODEX_NOT_ATTESTED") }
+                return "CODEX_NOT_ATTESTED"
+            }
         }
         val input=if(role!="CODING") FrozenCandidate.reopen(Path.of(context["inputDirectory"].asText()),identity["manifestSha256"].asText()) else null
         if(input!=null) check(input.candidateId==identity["candidateId"].asText() && input.binding.candidateTree==identity["sourceTree"].asText() && input.binding.codingSessionId==identity["codingSessionId"].asText())
