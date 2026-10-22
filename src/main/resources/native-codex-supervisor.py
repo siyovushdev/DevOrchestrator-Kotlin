@@ -122,6 +122,7 @@ def run(config):
                 break
         time.sleep(0.01)
     return {"boot_id": boot, "machine_id": machine, "supervisor": me, "child": root,
+            "argv0": config["argv"][0],
             "exit_code": root_exit, "cleanup_echild": clean, "reaped": reaped,
             "cause": cause or "exited"}
 

@@ -47,6 +47,19 @@ model=fake-model
         Files.setPosixFilePermissions(hosts,PosixFilePermissions.fromString("rw-r--r--"))
         assertFails { PersonalConfig.read(file) }
     }
+    @Test fun optionalCodexSha256IsAnOperatorPinAndThePathMustBeAbsolute() {
+        val file=setup()
+        val base=Files.readString(file)
+        assertNull(PersonalConfig.read(file).codexSha256)
+        Files.writeString(file, base+"codexSha256=\n")
+        assertNull(PersonalConfig.read(file).codexSha256)
+        Files.writeString(file, base+"codexSha256=${"ab".repeat(32)}\n")
+        assertEquals("ab".repeat(32), PersonalConfig.read(file).codexSha256)
+        Files.writeString(file, base+"codexSha256=ABC\n")
+        assertFails { PersonalConfig.read(file) }
+        Files.writeString(file, base.replace("codex=/fake/codex","codex=/not a path"))
+        assertFails { PersonalConfig.read(file) }
+    }
     @Test fun wrongRepositoryAndPublicConfigCannotGrantAuthority() {
         val file=setup(); val valid=Files.readString(file)
         Files.writeString(file,valid.replace("1424152600","123")); assertFails { PersonalConfig.read(file) }

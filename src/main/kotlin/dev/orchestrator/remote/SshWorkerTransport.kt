@@ -63,9 +63,17 @@ internal class SshWorkerTransport(private val config: SshWorkerConfig): WorkerTr
 }
 
 /** Controller-side measurement of a Codex binary. elf, size and sha256 are computed here. */
-internal data class MeasuredBinary(val elf: Boolean, val size: Long, val sha256: String) {
-    val attested: Boolean get() = elf && size >= 1_000_000L && sha256.matches(Regex("[0-9a-f]{64}"))
-}
+internal data class MeasuredBinary(val elf: Boolean, val size: Long, val sha256: String)
+
+/**
+ * The executed path and the operator path must be the same file. An optional
+ * expected sha256 is an operator pin, never a hash compiled into the product.
+ * Without that pin, ELF and size are the only checks and any large ELF at that path passes.
+ */
+internal fun codexAttestationOk(executedPath: String, configuredPath: String, measured: MeasuredBinary?, expectedSha256: String?): Boolean =
+    executedPath.isNotEmpty() && executedPath==configuredPath && measured!=null &&
+        measured.elf && measured.size>=1_000_000L && measured.sha256.matches(Regex("[0-9a-f]{64}")) &&
+        (expectedSha256.isNullOrBlank() || measured.sha256==expectedSha256)
 
 internal fun measureStream(input: InputStream, limit: Long = 512L * 1024 * 1024): MeasuredBinary {
     val digest=MessageDigest.getInstance("SHA-256")

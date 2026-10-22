@@ -47,6 +47,7 @@ internal class WorkflowEngine(
     internal val ownerCorrectionCeiling: () -> Int = { correctionLimit },
     internal val stopRequested: () -> Boolean = { false },
     internal val fixtureCli: Boolean = false,
+    private val expectedCodexSha256: String? = null,
 ) {
     internal val store = SqliteTaskStore(database)
     internal val db = RuntimeDatabase(database)
@@ -88,7 +89,8 @@ internal class WorkflowEngine(
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
                 remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
-                    proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested,fixtureCli=fixtureCli).run(intent.attemptId).reason
+                    proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested,fixtureCli=fixtureCli,
+                    expectedCodexSha256=expectedCodexSha256).run(intent.attemptId).reason
             }
             else -> w.phase.name
         }
@@ -254,8 +256,10 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
 """.toByteArray()
             check(ownerGo())
             if (!fixtureCli) {
-                if (!CodexAttestation.nativeBinary(codex.toRealPath()) ||
-                    !LocalSecretCanary.pass(codex.toRealPath(), copy.filesDirectory, home, python, false))
+                val binary=codex.toRealPath()
+                if (!CodexAttestation.accepts(CodexAttestation.measure(binary), expectedCodexSha256))
+                    return terminalProbe(w, id, "CODEX_NOT_ATTESTED")
+                if (!LocalSecretCanary.pass(binary, copy.filesDirectory, home, python, false))
                     return terminalProbe(w, id, "CODEX_CANARY_FAILED")
             }
             val observed = NativeProcessRunner(python).run(LinuxIsolation.prefix(copy.filesDirectory,false,home,codex,output)+

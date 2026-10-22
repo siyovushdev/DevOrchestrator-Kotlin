@@ -304,7 +304,9 @@ def native_policy(c, source, attempt, role, supervisor):
     if role == 'CODING':
         script += "p.write_bytes(b'probe'); assert p.read_bytes()==b'probe'; p.write_bytes(b'public-source-probe')\n"
     else:
-        script += "try: p.write_bytes(b'probe')\nexcept OSError: pass\nelse: raise SystemExit(93)\n"
+        # Same class of bug as the old exit 91. A mount can report a successful
+        # write that never reaches the host. The caller checks the host bytes.
+        script += "try: p.write_bytes(b'probe')\nexcept OSError: pass\n"
     argv = [c['codex'], 'sandbox', *overrides,
             '--', '/usr/bin/python3', '-I', '-S', '-c', script]
     child_env = env(str(home))
@@ -452,8 +454,9 @@ def execute(c, attempt):
             if p.exists():
                 data = read(p, 1024 * 1024)
                 artifacts[name] = {'data': base64.b64encode(data).decode(), 'sha256': sha(data)}
-        # The guest does not attest its own binary. The controller measures the file.
-        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts}
+        # Path the supervisor actually spawned. Not an elf/size/sha256 attestation.
+        result = {'state': 'FINISHED', 'receipt': raw, 'outputTree': output_tree, 'files': files, 'artifacts': artifacts,
+                  'codexPath': None if role == 'TESTS' else raw.get('argv0')}
         result.update({'version': 1, 'requestSha256': sha(read(attempt / 'request.json')), 'workerSha256': installation_digest(), 'identity': r['identity'], 'started': identity, 'nativePolicyReceipt': load(read(attempt / 'policy-receipt.json')) if role != 'TESTS' else None})
         payload = encoded(result)
         if len(payload) > LIMIT:

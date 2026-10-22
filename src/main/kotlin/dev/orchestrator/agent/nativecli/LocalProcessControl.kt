@@ -32,6 +32,12 @@ internal object CodexAttestation {
     fun measure(path: Path): dev.orchestrator.remote.MeasuredBinary? = try {
         java.nio.file.Files.newInputStream(path, NOFOLLOW_LINKS).use { dev.orchestrator.remote.measureStream(it) }
     } catch (_: Exception) { null }
+
+    /** ELF and size always. expectedSha256 is an operator pin; unset means the size check only. */
+    fun accepts(measured: dev.orchestrator.remote.MeasuredBinary?, expectedSha256: String?): Boolean =
+        measured!=null && measured.elf && measured.size>=1_000_000L &&
+            measured.sha256.matches(Regex("[0-9a-f]{64}")) &&
+            (expectedSha256.isNullOrBlank() || measured.sha256==expectedSha256)
 }
 
 /**

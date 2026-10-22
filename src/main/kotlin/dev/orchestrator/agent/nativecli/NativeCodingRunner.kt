@@ -45,6 +45,7 @@ internal class NativeCodingRunner(
     private val ownerGo: () -> Boolean = { true },
     private val stopRequested: () -> Boolean = { false },
     private val fixtureCli: Boolean = false,
+    private val expectedCodexSha256: String? = null,
 ) {
     private val databasePath=database.toAbsolutePath().normalize()
     private val store = SqliteTaskStore(database)
@@ -139,8 +140,10 @@ internal class NativeCodingRunner(
         if (stopRequested()) return complete(AttemptState.CANCELLED,"OWNER_STOP_BEFORE_START")
         if (!ownerGo() || !journal.markStarting(attemptId)) return CodingRunResult(null,"START_GUARD_DENIED",artifacts)
         if (!fixtureCli) {
-            if (!CodexAttestation.nativeBinary(codex.toRealPath())) return complete(AttemptState.FAILED,"CODEX_NOT_ATTESTED")
-            if (!LocalSecretCanary.pass(codex.toRealPath(), intent.workspace, home, python, true))
+            val binary=codex.toRealPath()
+            if (!CodexAttestation.accepts(CodexAttestation.measure(binary), expectedCodexSha256))
+                return complete(AttemptState.FAILED,"CODEX_NOT_ATTESTED")
+            if (!LocalSecretCanary.pass(binary, intent.workspace, home, python, true))
                 return complete(AttemptState.FAILED,"CODEX_CANARY_FAILED")
         }
         val observation = NativeProcessRunner(python,outputLimit).run(

@@ -12,6 +12,7 @@ internal data class PersonalConfig(
     val model: String, val minimumTests: Int, val proxyPort: Int, val pollSeconds: Long,
     val runtimeMode: String = "local",
     val ssh: dev.orchestrator.remote.SshWorkerConfig? = null,
+    val codexSha256: String? = null,
 ) {
     companion object {
         fun read(file: Path): PersonalConfig {
@@ -37,7 +38,9 @@ internal data class PersonalConfig(
             }
             require(root!=home && !root.startsWith(home) && !home.startsWith(root))
             val binary=Path.of(p.getProperty("codex"))
-            require(binary.isAbsolute)
+            require(binary.isAbsolute && binary.toString().matches(Regex("/[A-Za-z0-9._+/-]{1,400}")))
+            val pin=p.getProperty("codexSha256")?.trim()?.ifEmpty { null }
+            if(pin!=null) require(pin.matches(Regex("[0-9a-f]{64}"))) { "CODEX_SHA256" }
             val model=requireNotNull(p.getProperty("model"))
             require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")))
             val minimum=p.getProperty("minimumTests","1").toInt(); require(minimum in 1..10000)
@@ -45,7 +48,7 @@ internal data class PersonalConfig(
             val poll=p.getProperty("pollSeconds","90").toLong(); require(poll in 60..120)
             val ssh=if(mode=="ssh-vm") dev.orchestrator.remote.SshWorkerConfig(
                 Path.of(requireNotNull(p.getProperty("sshIdentityFile"))),Path.of(requireNotNull(p.getProperty("sshKnownHosts")))) else null
-            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode,ssh)
+            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode,ssh,pin)
         }
     }
 }

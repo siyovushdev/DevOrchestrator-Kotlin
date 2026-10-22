@@ -50,10 +50,14 @@ internal class RemoteAttemptJournal(file: Path) {
         return true
     }
     fun record(id: String,state: String,evidence: ByteArray?=null,diagnostic: String?=null) = db.write { c ->
-        require(state in setOf("UNKNOWN","RUNNING","EVIDENCE_STORED","TIMEOUT"))
+        require(state in setOf("UNKNOWN","RUNNING","EVIDENCE_STORED","TIMEOUT","CANCELLED"))
         val current=c.rows("SELECT state,evidence FROM remote_attempts WHERE attempt_id=?",id) { it.getString(1) to it.getBytes(2) }.single()
         if(current.first=="EVIDENCE_STORED") {
             check(state==current.first && current.second.contentEquals(evidence)) { "REMOTE_IMMUTABLE_RESULT_CHANGED" }
+            return@write
+        }
+        if(current.first=="CANCELLED") {
+            check(state=="CANCELLED") { "REMOTE_IMMUTABLE_RESULT_CHANGED" }
             return@write
         }
         c.mutate("UPDATE remote_attempts SET state=?,evidence=? WHERE attempt_id=?",state,evidence,id)
@@ -85,7 +89,7 @@ internal class RemoteWorkerClient(private val journal: RemoteAttemptJournal,priv
     }
     fun reconcile(id: String): String {
         val saved=requireNotNull(journal.find(id))
-        if(saved.state=="EVIDENCE_STORED") return saved.state
+        if(saved.state=="EVIDENCE_STORED" || saved.state=="CANCELLED") return saved.state
         val wire=RemoteProtocol.mapper.writeValueAsBytes(mapOf("op" to "query","attemptId" to id,"requestSha256" to saved.request.sha256))
         return exchange(saved.request,wire,15000)
     }
@@ -100,6 +104,7 @@ internal class RemoteWorkerClient(private val journal: RemoteAttemptJournal,priv
                 "FINISHED" -> { evidence.check(request,bytes); "EVIDENCE_STORED" }
                 "RUNNING" -> "RUNNING"
                 "TIMEOUT" -> "TIMEOUT"
+                "CANCELLED" -> "CANCELLED" // owner cancel and client death; not an unknown hold
                 else -> "UNKNOWN" // NOT_FOUND/DENIED is not permission to resubmit.
             }
         } catch(e: Exception) {

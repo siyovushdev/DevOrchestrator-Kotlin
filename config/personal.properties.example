@@ -9,6 +9,11 @@ owner=siyovushdev
 root=/home/devorch-e2e/personal-service/state
 agentHome=/home/devorch-e2e/personal-service/agent-home
 codex=/home/devorch-e2e/.local/bin/codex
+# Optional pin of that exact file. 64 lowercase hex. Do not commit a real build hash here.
+# When unset, attestation checks only that the file is an ELF of at least 1 MiB. That is weaker:
+# any large ELF at this path is accepted. For ssh-vm this path must be the VM path in the worker
+# config, the same string the guest executes. The controller measures that file itself.
+# codexSha256=
 # Owner must choose a model available to the installed CLI/account.
 model=OWNER_MUST_SELECT
 minimumTests=1

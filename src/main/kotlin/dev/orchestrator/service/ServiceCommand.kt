@@ -142,6 +142,7 @@ runtime=${config.runtimeMode}
 repository=siyovushdev/devorch-kotlin-e2e-smoke id=1424152600
 isolation=$isolation
 codex=$codex
+codexSha256=${if (config.codexSha256==null) "unset-elf-size-only" else "pinned"}
 lock=${java.nio.file.Files.exists(config.root.resolve("service.lock"))}
 $tasks"""
 }

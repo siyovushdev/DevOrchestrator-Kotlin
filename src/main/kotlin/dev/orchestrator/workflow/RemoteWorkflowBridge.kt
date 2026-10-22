@@ -19,7 +19,9 @@ import java.util.Base64
 /** Owner-controlled endpoint identity, independent of Issue/model content. No controller secrets on wire. */
 internal data class RemoteExecutionSettings(val peer: String,val transport: WorkerTransport,
     val importCheckpoint: (String) -> Unit = {},
-    val codexMeasurement: () -> MeasuredBinary? = { null })
+    val codexMeasurement: () -> MeasuredBinary? = { null },
+    val codexPath: String = "",
+    val expectedCodexSha256: String? = null)
 
 /** Phase adapter, not a scheduler. The existing engine still owns phases, corrections and publication. */
 internal class RemoteWorkflowBridge(private val engine: WorkflowEngine,private val settings: RemoteExecutionSettings) {
@@ -116,6 +118,10 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
                 }
                 return "STAGE_TIMEOUT"
             }
+            if(state=="CANCELLED") {
+                cancelWithoutImport(w.id, id)
+                return "CANCELLED"
+            }
             if(state!="EVIDENCE_STORED") { hold(w.id,id); return "REMOTE_UNKNOWN_NEEDS_OWNER" }
             if(engine.stopRequested() || importBlocked(id)) {
                 blockImport(id)
@@ -140,7 +146,11 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         check(site(engine.database,r.request.json["identity"]["workflowId"].asText())==settings.peer)
         val state=try { client.reconcile(id) } catch(_: RemoteExchangeUnknown) { "UNKNOWN" }
         val bytes=journal.find(id)!!.evidence
-        return if(state=="EVIDENCE_STORED") "$state:${RemoteProtocol.digest(bytes!!)}" else "$state:NEEDS_OWNER"
+        return when(state) {
+            "EVIDENCE_STORED" -> "$state:${RemoteProtocol.digest(bytes!!)}"
+            "CANCELLED" -> "CANCELLED"
+            else -> "$state:NEEDS_OWNER"
+        }
     }
     fun resume(id: String,digest: String): Boolean {
         require(RemoteProtocol.sha(digest,64))
@@ -207,7 +217,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
         val n=mapper.readTree(saved.evidence); val exit=n["receipt"]["exit_code"].asInt()
         if(!engine.fixtureCli && role!="TESTS") {
             val measured=try { settings.codexMeasurement() } catch(_: Exception) { null }
-            if(measured?.attested!=true) {
+            if(!codexAttestationOk(n.path("codexPath").asText(""), settings.codexPath, measured, settings.expectedCodexSha256)) {
                 blockImport(id)
                 db.write { c -> engine.hold(c,w.id,"CODEX_NOT_ATTESTED") }
                 return "CODEX_NOT_ATTESTED"

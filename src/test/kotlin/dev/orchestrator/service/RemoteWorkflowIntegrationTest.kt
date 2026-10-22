@@ -364,6 +364,20 @@ class Boundary(unittest.TestCase):
         assertTrue(RuntimeDatabase(db(i)).read { c -> c.rows("SELECT 1 FROM workflow_verifications") { 1 }.isEmpty() })
     }
 
+    @Test fun remoteGuestCancelReleasesTheServiceQueue() {
+        setup()
+        responseEdit={ role, bytes -> if(role=="CODING") """{"state":"CANCELLED","code":"OWNER_CANCEL"}""".toByteArray() else bytes }
+        val s=service(listOf(issue(17), issue(18)))
+        assertEquals("ACTIVE", s.tick())
+        assertEquals("CANCELLED", s.tick())
+        assertEquals("ACTIVE", s.tick())
+        val stage=RuntimeDatabase(root.resolve("service.db")).read { c ->
+            c.rows("SELECT state,stage FROM personal_tasks WHERE number=17") { it.getString(1)+"/"+it.getString(2) }.single()
+        }
+        assertEquals("done/cancelled", stage)
+        assertFalse(s.localStatus().contains("NEEDS_OWNER"))
+    }
+
     @Test fun idempotentOuterResumeStillHonorsRevokedPolicyAfterInnerCommit() {
         setup(); val i=issue(17); var s=service(listOf(i)); s.tick(); loseRole="CODING"; s.tick()
         val id=actionId(i,"CODING"); val checked=s.checkRemote(17,id); checkpoint="AFTER_COMMIT"

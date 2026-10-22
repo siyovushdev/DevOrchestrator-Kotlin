@@ -8,7 +8,10 @@ owner=siyovushdev
 root=/home/devorch-e2e/devorch-controller/state
 # Empty compatibility directory; no Codex login/credentials required on controller.
 agentHome=/home/devorch-e2e/devorch-controller/unused-agent-home
+# Absolute path on the VM. Must be identical to the guest worker config's codex path.
 codex=/unused/codex
+# Optional. Same meaning as personal.properties.example. Unset keeps the weaker ELF-and-size check.
+# codexSha256=
 model=OWNER_MUST_SELECT
 minimumTests=1
 proxyPort=10809

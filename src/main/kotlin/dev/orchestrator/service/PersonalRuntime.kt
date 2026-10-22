@@ -33,7 +33,8 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
 ) : TaskRuntime {
     private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { ssh ->
         val transport=SshWorkerTransport(ssh)
-        RemoteExecutionSettings(ssh.peer, transport, codexMeasurement={ transport.measure(config.codex) })
+        RemoteExecutionSettings(ssh.peer, transport, codexMeasurement={ transport.measure(config.codex) },
+            codexPath=config.codex.toString(), expectedCodexSha256=config.codexSha256)
     } else null }
     private val repo=SMOKE_TARGET.repositoryId
     private val mapper=ObjectMapper()
@@ -49,7 +50,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             Duration.ofSeconds(seconds.toLong()),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote,
             ownerCorrectionCeiling={ limits(i).maxCorrections },
             stopRequested={ ownerCancelRequested(config.root, i.issueNumber) },
-            fixtureCli=fixtureCli)
+            fixtureCli=fixtureCli, expectedCodexSha256=config.codexSha256)
     }
     private fun terminalOrHeld(w: WorkflowSnapshot): TaskProgress = when (w.holdReason) {
         "STAGE_TIMEOUT" -> TaskProgress("timed_out", reason=w.holdReason)
