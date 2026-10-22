@@ -104,6 +104,39 @@ model=fake-model
         serviceCommand(arrayOf("limits", file.toString(), "4", "1", StageBudget.DEFAULT_SECONDS.toString(), StageBudget.DEFAULT_SECONDS.toString()))
         assertEquals(ExecutionLimits(1, StageBudget.DEFAULT_SECONDS, StageBudget.DEFAULT_SECONDS), readExecutionLimits(db, 4))
     }
+    @Test fun `default CLI profile runs as the logged-in user and ssh-vm keeps the dedicated account`() {
+        val cli = PersonalConfig(true, Path.of("/state"), Path.of("/agent-home"), Path.of("/unused/cursor-cli"),
+            "account-default", 1, 10809, 90, "cursor-cli", profileId = "default", cursorCli = Path.of("/usr/local/bin/agent"))
+        requireDedicatedPersonalAccount(cli, "siovush")
+        val ssh = cli.copy(runtimeMode = "ssh-vm", profileId = "legacy", cursorCli = null, codex = Path.of("/usr/bin/codex"))
+        val denied = assertFailsWith<IllegalStateException> { requireDedicatedPersonalAccount(ssh, "siovush") }
+        assertEquals("Dedicated PERSONAL account required", denied.message)
+        requireDedicatedPersonalAccount(ssh, "devorch-e2e")
+        assertFailsWith<IllegalStateException> {
+            requireDedicatedPersonalAccount(cli.copy(runtimeMode = "local", profileId = "legacy", cursorCli = null), "siovush")
+        }
+        assertFailsWith<IllegalStateException> {
+            requireDedicatedPersonalAccount(cli.copy(runtimeMode = "cursor-cloud", profileId = "cloud-api", cursorCli = null), "siovush")
+        }
+        val file = setup()
+        val root = temp.resolve("state")
+        val home = temp.resolve("agent-home")
+        Files.writeString(file, """enabled=true
+runtimeMode=cursor-cli
+profile=default
+repository=siyovushdev/devorch-kotlin-e2e-smoke
+repositoryId=1424152600
+owner=siyovushdev
+root=$root
+agentHome=$home
+cursorCli=/usr/local/bin/agent
+model=account-default
+""")
+        val stopped = assertFailsWith<ServiceStopped> { serviceCommand(arrayOf("service", file.toString())) }
+        assertTrue(stopped.message!!.contains("IllegalArgumentException"))
+        assertFalse(stopped.message!!.contains("requireDedicatedPersonalAccount"))
+        assertFalse(stopped.message!!.contains("IllegalStateException"))
+    }
     @Test fun symlinkAndSharedStateAreRejected() {
         val file=setup(); val link=Files.createSymbolicLink(temp.resolve("config-link"),file)
         assertFails { PersonalConfig.read(link) }

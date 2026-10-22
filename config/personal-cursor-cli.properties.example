@@ -6,9 +6,9 @@ profile=default
 repository=siyovushdev/devorch-kotlin-e2e-smoke
 repositoryId=1424152600
 owner=siyovushdev
-# Existing canonical directories, mode 700, owned by devorch-e2e, not nested.
-root=/home/devorch-e2e/personal-service/state
-agentHome=/home/devorch-e2e/personal-service/agent-home
+# Existing canonical directories, mode 700, owned by the logged-in user. No separate Unix account.
+root=/home/LOGIN/personal-service/state
+agentHome=/home/LOGIN/personal-service/agent-home
 # Absolute path of the already logged-in Cursor CLI (`agent`). The stage fails if it is missing.
 cursorCli=/usr/local/bin/agent
 # account-default omits --model and uses the logged-in account. auth is subscription, not an API key.

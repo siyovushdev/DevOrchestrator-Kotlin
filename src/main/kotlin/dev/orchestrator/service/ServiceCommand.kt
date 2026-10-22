@@ -7,6 +7,15 @@ import java.nio.file.Path
 /** Explicit CLI only. Normal bootstrap and CI never start the autonomous worker. */
 internal class ServiceStopped(message: String) : IllegalStateException(message)
 
+/**
+ * The default CLI subscription runs as the already logged-in user.
+ * ssh-vm, local Codex, and cloud-api keep the dedicated account.
+ */
+internal fun requireDedicatedPersonalAccount(config: PersonalConfig, userName: String = System.getProperty("user.name")) {
+    if (config.runtimeMode == "cursor-cli" && config.selectedProfile() == "default") return
+    check(userName == "devorch-e2e") { "Dedicated PERSONAL account required" }
+}
+
 internal fun serviceCommand(args: Array<String>) {
     try { executeServiceCommand(args) }
     catch (failure: ServiceStopped) { throw failure }
@@ -69,7 +78,7 @@ private fun executeServiceCommand(args: Array<String>) {
     }
     ServiceLock(config.root).use {
         if(!config.enabled && command !in setOf("resume-status","check-remote","resume-remote")) { println("PERSONAL autonomy OFF"); return }
-        check(System.getProperty("user.name")=="devorch-e2e") { "Dedicated PERSONAL account required" }
+        requireDedicatedPersonalAccount(config)
         val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
         val github=PersonalGitHub(token)
         val permitted={ PersonalConfig.read(file)==config && config.enabled }

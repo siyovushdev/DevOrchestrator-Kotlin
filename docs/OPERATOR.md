@@ -9,6 +9,7 @@ Merge всегда вручную. Команды ниже не открываю
 Рабочий путь — `runtimeMode=cursor-cli` и `profile=default`. Пример: `config/personal-cursor-cli.properties.example`.
 Роли coder и reviewer запускают уже залогиненный `agent` на контроллере: `-p --trust --force --sandbox disabled`.
 Отдельной песочницы, bubblewrap и SSH на этом пути нет. Ключ `CURSOR_API_KEY` не нужен: auth профиля — `subscription`.
+Сервис запускается от уже залогиненного пользователя. Отдельная учётная запись Unix на этом профиле не нужна.
 Если бинарник `cursorCli` не исполняемый, стадия останавливается. Перехода на cloud или Codex нет.
 Одна стадия — один адаптер. Coding и Review — две разные сессии. Тесты между ними запускает контроллер.
 Строка стадии пишется до запуска. UNKNOWN эту сессию не повторяет. Draft PR по-прежнему один.
@@ -51,7 +52,9 @@ Coding и Review — два разных вызова `POST /v1/agents`. У ка
 ## Подготовка
 
 1. JDK 21, Git, Python 3, bubblewrap (`/usr/bin/bwrap` с user/pid/net namespaces).
-2. Учётная запись `devorch-e2e`. Каталоги state и agent-home — разные, mode 700, владелец этой учётной записи.
+2. Каталоги state и agent-home — разные, mode 700, владелец того пользователя, который запускает процесс.
+   Профиль `default` (`cursor-cli`) — это уже залогиненный пользователь, без отдельной учётной записи.
+   Путь `ssh-vm`, локальный Codex и `cloud-api` по-прежнему требуют пользователя `devorch-e2e`.
 3. Скопировать `config/personal.properties.example` вне checkout и agent-home, `chmod 600`.
    `enabled` оставить `false`, пока нет отдельного разрешения на живой запуск.
 4. Токен репозитория только в окружении процесса: `DEVORCH_PERSONAL_TOKEN`.
