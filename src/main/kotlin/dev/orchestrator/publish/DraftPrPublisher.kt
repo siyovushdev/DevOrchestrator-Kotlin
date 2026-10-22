@@ -105,8 +105,10 @@ internal class DraftPrPublisher(
             check(journal.confirm(plan.workflowId,EffectKind.DRAFT_PR,api.drafts(plan)))
             check(journal.finish(plan))
             return PublicationResult("DRAFT_PR_CREATED",confirmedUrl(plan.workflowId))
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
             if (active!=null) journal.uncertain(w.id,active,"PUBLICATION_OUTCOME_UNCERTAIN")
+            if (System.getProperty("devorch.publication.trace")=="1")
+                return PublicationResult("TRACE:${failure.javaClass.simpleName}:${failure.message?.take(500)?.replace('\n',' ')}")
             return PublicationResult(if (active!=null) "UNCERTAIN_NEEDS_OWNER" else "GUARD_OR_INPUT_DENIED")
         }
     }
@@ -192,11 +194,18 @@ internal class DraftPrPublisher(
         fun started(type: String,n: JsonNode) = events.filter { it.type==type }.map { mapper.readTree(it.detail) }
             .any { birthMatches(n,it) }
         val remote=dev.orchestrator.workflow.RemoteWorkflowBridge.site(database,w.id)!=null
-        if(!remote) check(started("VERIFICATION_PROCESS_STARTED",raw.path("process")))
-        val completion=events.filter { it.type==if(remote) "REMOTE_CODING_COMPLETED" else "CODING_PROCESS_SUCCEEDED" }.map { mapper.readTree(it.detail) }
+        val cursor=dev.orchestrator.cursor.CursorCloudWorkflowBridge.site(database,w.id)!=null
+        check(!(remote && cursor))
+        if(!remote && !cursor) check(started("VERIFICATION_PROCESS_STARTED",raw.path("process")))
+        val completionType=when {
+            cursor -> "CURSOR_CODING_COMPLETED"
+            remote -> "REMOTE_CODING_COMPLETED"
+            else -> "CODING_PROCESS_SUCCEEDED"
+        }
+        val completion=events.filter { it.type==completionType }.map { mapper.readTree(it.detail) }
             .single { it.path("attempt_id").asText()==intent.attemptId }
-        clean(completion.path("observed"))
-        if(!remote) {
+        if(!cursor) clean(completion.path("observed"))
+        if(!remote && !cursor) {
         val codingBirth=events.filter { it.type=="CODING_PROCESS_STARTED" }.map { mapper.readTree(it.detail) }
             .single { it.path("attempt_id").asText()==intent.attemptId }.path("identity")
         check(birthMatches(completion.path("observed"),codingBirth))
@@ -210,8 +219,8 @@ internal class DraftPrPublisher(
             completion.path("assignment_version").asLong()==intent.assignmentVersion && completion.path("manifest_version").asLong()==intent.manifestVersion)
         val reviews=events.filter { it.type=="REVIEW_COMPLETED" }.map { mapper.readTree(it.detail) }
         val review=reviews.single { it.path("receipt").path("codingGeneration").asInt(-1)==w.correctionsUsed }
-        clean(review.path("process"))
-        if(!remote) check(started("REVIEW_PROCESS_STARTED",review.path("process")))
+        if(!cursor) clean(review.path("process"))
+        if(!remote && !cursor) check(started("REVIEW_PROCESS_STARTED",review.path("process")))
         val r=review.path("receipt")
         val receipt=ReviewReceipt(r.path("candidateId").asText(),r.path("reviewerAttemptId").asText(),r.path("reviewerSessionId").asText(),
             r.path("candidateManifestSha256").asText(),r.path("candidateTree").asText(),r.path("codingGeneration").asInt(-1),
@@ -223,6 +232,7 @@ internal class DraftPrPublisher(
             ReviewEvidencePolicy.evaluate(candidate,receipt,candidate.manifestSha256,w.correctionsUsed,2)==ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS &&
             reviews.none { it!==review && it.path("receipt").path("reviewerSessionId").asText()==receipt.reviewerSessionId })
         if(remote) dev.orchestrator.workflow.RemotePublicationEvidence.validate(database,policy.workspaceRoot,w,candidate,raw,intent,completion,review)
+        if(cursor) dev.orchestrator.cursor.CursorPublicationEvidence.validate(database,policy.workspaceRoot,w,candidate,completion,review)
         db.read { c ->
             check(c.rows("""SELECT 1 FROM review_inputs r JOIN agent_attempts a ON a.attempt_id=r.attempt_id
                 JOIN attempt_contexts x ON x.attempt_id=a.attempt_id WHERE r.attempt_id=? AND r.workflow_id=? AND r.generation=?

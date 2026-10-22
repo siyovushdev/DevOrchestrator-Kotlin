@@ -4,6 +4,33 @@
 `siyovushdev/devorch-kotlin-e2e-smoke`. Текст Issue не даёт прав и не меняет лимиты.
 Merge всегда вручную. Команды ниже не открывают HTTP-порт и не ставят службу сами.
 
+## Исполнитель: Cursor Cloud Agents API
+
+Рабочий режим — `runtimeMode=cursor-cloud`. Пример: `config/personal-cursor-cloud.properties.example`.
+Код не вызывает Codex CLI, не читает ключ OpenAI и не открывает локальный SSH.
+
+Ключ только в окружении процесса: `CURSOR_API_KEY`. Это пользовательский или сервисный ключ
+Cursor Dashboard → API Keys. В файл конфигурации, Issue, аргументы и репозиторий его не писать.
+`doctor` печатает `cursorKey=set` или `unset` и не показывает значение. `model=account-default`
+оставляет выбор модели аккаунту Cursor. Другое значение уходит как `model.id`.
+
+Coding и Review — два разных вызова `POST /v1/agents`. У каждого свой `agentId`.
+`autoCreatePR=false`: агент не открывает PR. Контроллер после тестов и ревью публикует
+не больше одного Draft PR. Тесты — прежний `verify-python-unittest.py` внутри bubblewrap,
+без ключа Cursor и без токена GitHub в окружении процесса.
+
+Потолок времени и число исправлений (0..2) те же. Денежный потолок провайдера API v1 не принимает:
+`monetary_cap_enforced` остаётся false. Потерянный ответ создания агента — `CURSOR_OUTCOME_UNKNOWN`.
+Повторного `POST /v1/agents` для той же попытки нет. Явные `check-remote` и `resume-remote`
+только читают уже созданный агент и не создают новый.
+
+`exclude CONFIG ISSUE GITHUB_ISSUE_ID` не даёт сервису взять Issue. Команда читает GitHub,
+сверяет номер и id и ничего не публикует. Для незакрытого результата Issue #6:
+`exclude CONFIG 6 5927591593`. Это не `resume-status` и не `resume-remote`.
+
+Отмена посылает `POST /v1/agents/{id}/runs/{runId}/cancel`. Если остановка не подтверждена,
+это не успешная отмена. Уже открытый Draft PR не закрывается.
+
 ## Подготовка
 
 1. JDK 21, Git, Python 3, bubblewrap (`/usr/bin/bwrap` с user/pid/net namespaces).
@@ -20,6 +47,7 @@ Merge всегда вручную. Команды ниже не открываю
 ```
 dev-orchestrator-kotlin doctor /absolute/personal.properties
 dev-orchestrator-kotlin status /absolute/personal.properties
+dev-orchestrator-kotlin exclude /absolute/personal.properties 6 5927591593
 dev-orchestrator-kotlin limits /absolute/personal.properties default 2 1200 1200
 dev-orchestrator-kotlin limits /absolute/personal.properties 17 1 900 900
 dev-orchestrator-kotlin cancel /absolute/personal.properties 17

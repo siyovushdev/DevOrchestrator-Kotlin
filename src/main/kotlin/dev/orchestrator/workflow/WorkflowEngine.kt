@@ -48,6 +48,7 @@ internal class WorkflowEngine(
     internal val stopRequested: () -> Boolean = { false },
     internal val fixtureCli: Boolean = false,
     private val expectedCodexSha256: String? = null,
+    private val cursor: dev.orchestrator.cursor.CursorCloudSettings? = null,
 ) {
     internal val store = SqliteTaskStore(database)
     internal val db = RuntimeDatabase(database)
@@ -57,10 +58,12 @@ internal class WorkflowEngine(
     private val probe = BoundedNativeProbeReader(maxOutputBytes=1_000_000)
 
     private val remoteBridge by lazy { remote?.let { RemoteWorkflowBridge(this,it) } }
+    private val cursorBridge by lazy { cursor?.let { dev.orchestrator.cursor.CursorCloudWorkflowBridge(this,it) } }
 
     init {
         require(repositoryId>0 && minimumTests in 1..10000 && correctionLimit in 0..2)
         require(timeout.toMillis() in 50L..StageBudget.MAX_MILLIS && proxyPort in 1..65535)
+        require(remote==null || cursor==null)
     }
 
     /** One persisted action per call. Repeated terminal/pending calls do not launch twice. */
@@ -70,8 +73,8 @@ internal class WorkflowEngine(
         if (w.hold!=WorkflowHold.NONE || !ownerGo()) return "NEEDS_OWNER"
         if (stopRequested()) return cancelIfQuiet(issueNumber)
         return when (w.phase) {
-            WorkflowPhase.VERIFYING -> verifyCompletedCoding(issueNumber)
-            WorkflowPhase.REVIEWING -> launchReview(issueNumber)
+            WorkflowPhase.VERIFYING -> cursorBridge?.execute(issueNumber,"TESTS") ?: verifyCompletedCoding(issueNumber)
+            WorkflowPhase.REVIEWING -> cursorBridge?.execute(issueNumber,"REVIEW") ?: launchReview(issueNumber)
             WorkflowPhase.QUEUED -> {
                 val capped = db.read { c -> c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",
                     w.id,w.correctionsUsed) { it.getInt(1) }.singleOrNull() }?.let { minOf(it, ownerCorrectionCeiling().coerceIn(0,2)) }
@@ -87,6 +90,7 @@ internal class WorkflowEngine(
             }
             WorkflowPhase.CODING -> {
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
+                cursorBridge?.let { return it.execute(issueNumber,"CODING") }
                 remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
                     proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested,fixtureCli=fixtureCli,
@@ -319,6 +323,7 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     /** Call on exclusive controller recovery, never while another controller is actively running. */
     fun recover(issueNumber: Int = 1): Int {
         store.findWorkflow(repositoryId,issueNumber)?.let { requireExecutionSite(it.id) }
+        cursorBridge?.let { return it.recover(issueNumber) }
         remoteBridge?.let { return it.recover(issueNumber) }
         val workflow = store.findWorkflow(repositoryId,issueNumber) ?: return 0
         if (store.findPolicy(repositoryId)?.kind!=ProjectKind.PERSONAL) return 0
@@ -345,11 +350,17 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     }
 
     private fun requireExecutionSite(workflow: String) {
-        val site=RemoteWorkflowBridge.site(database,workflow)
-        check(if(remote==null) site==null else site==remote.peer) { "EXECUTION_SITE_CHANGED" }
+        val remoteSite=RemoteWorkflowBridge.site(database,workflow)
+        val cursorSite=dev.orchestrator.cursor.CursorCloudWorkflowBridge.site(database,workflow)
+        check(remoteSite==null || cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+        when {
+            cursor!=null -> check(cursorSite==cursor.peer) { "EXECUTION_SITE_CHANGED" }
+            remote!=null -> check(remoteSite==remote.peer) { "EXECUTION_SITE_CHANGED" }
+            else -> check(remoteSite==null && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+        }
     }
-    fun checkRemote(id: String): String = requireNotNull(remoteBridge).checkRemote(id)
-    fun resumeRemote(id: String,digest: String): Boolean = requireNotNull(remoteBridge).resume(id,digest)
+    fun checkRemote(id: String): String = cursorBridge?.check(id) ?: requireNotNull(remoteBridge).checkRemote(id)
+    fun resumeRemote(id: String,digest: String): Boolean = cursorBridge?.resume(id,digest) ?: requireNotNull(remoteBridge).resume(id,digest)
 
     private fun trustedCodingCompletion(intent: CodingIntent): Pair<String,String> {
         val events = store.listEvents(intent.workflowId)

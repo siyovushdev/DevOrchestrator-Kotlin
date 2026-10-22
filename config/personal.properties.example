@@ -1,3 +1,4 @@
+# The product executor is runtimeMode=cursor-cloud. See personal-cursor-cloud.properties.example.
 # Owner-managed file OUTSIDE every checkout/agentHome. chmod 600 before use.
 # Copy/change on HOME only after a separate Owner decision. Nothing is enabled by this example.
 enabled=false

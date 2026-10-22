@@ -29,7 +29,7 @@ internal data class PersonalConfig(
             fun directory(key: String): Path = Path.of(p.getProperty(key)).also {
                 require(it.isAbsolute && it.normalize()==it && it.toRealPath()==it && Files.isDirectory(it,NOFOLLOW_LINKS))
             }
-            val mode=p.getProperty("runtimeMode","local"); require(mode in setOf("local","ssh-vm"))
+            val mode=p.getProperty("runtimeMode","local"); require(mode in setOf("local","ssh-vm","cursor-cloud"))
             val root=directory("root"); val home=directory("agentHome")
             require(Files.getPosixFilePermissions(root).none { it.name.startsWith("GROUP_") || it.name.startsWith("OTHERS_") })
             require(Files.getOwner(root).name==System.getProperty("user.name"))
@@ -37,9 +37,13 @@ internal data class PersonalConfig(
                 "Controller HOME or its ancestor cannot be delegated"
             }
             require(root!=home && !root.startsWith(home) && !home.startsWith(root))
-            val binary=Path.of(p.getProperty("codex"))
-            require(binary.isAbsolute && binary.toString().matches(Regex("/[A-Za-z0-9._+/-]{1,400}")))
-            val pin=p.getProperty("codexSha256")?.trim()?.ifEmpty { null }
+            val binary=if(mode=="cursor-cloud") {
+                require(p.getProperty("codex")==null && p.getProperty("codexSha256")==null && p.getProperty("sshIdentityFile")==null)
+                Path.of("/unused/cursor-cloud")
+            } else Path.of(p.getProperty("codex")).also {
+                require(it.isAbsolute && it.toString().matches(Regex("/[A-Za-z0-9._+/-]{1,400}")))
+            }
+            val pin=if(mode=="cursor-cloud") null else p.getProperty("codexSha256")?.trim()?.ifEmpty { null }
             if(pin!=null) require(pin.matches(Regex("[0-9a-f]{64}"))) { "CODEX_SHA256" }
             val model=requireNotNull(p.getProperty("model"))
             require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")))

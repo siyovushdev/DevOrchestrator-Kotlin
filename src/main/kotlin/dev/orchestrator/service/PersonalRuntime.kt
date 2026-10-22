@@ -5,6 +5,10 @@ import dev.orchestrator.agent.nativecli.*
 import dev.orchestrator.publish.*
 import dev.orchestrator.storage.*
 import dev.orchestrator.workflow.*
+import dev.orchestrator.cursor.CursorCloudHttpApi
+import dev.orchestrator.cursor.CursorCloudSettings
+import dev.orchestrator.cursor.CursorCloudWorkflowBridge
+import dev.orchestrator.cursor.PersonalGitFetcher
 import dev.orchestrator.remote.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.nio.file.Files
@@ -29,6 +33,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     private val publicationPush: PublicationPush = GitHubBranchPush(token),
     private val fetch: (GitHubIssueRecord,Path,Path) -> Unit = { i,c,a -> fetchPersonalCheckout(token,i,c,a,permitted) },
     private val remoteOverride: RemoteExecutionSettings? = null,
+    private val cursorOverride: CursorCloudSettings? = null,
     private val fixtureCli: Boolean = false,
 ) : TaskRuntime {
     private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { ssh ->
@@ -36,6 +41,10 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         RemoteExecutionSettings(ssh.peer, transport, codexPath=config.codex.toString(),
             expectedCodexSha256=config.codexSha256, liveExecution={ transport.liveExecution() })
     } else null }
+    private val cursor by lazy {
+        if(config.runtimeMode!="cursor-cloud") null
+        else cursorOverride ?: CursorCloudSettings(api=CursorCloudHttpApi(), fetch=PersonalGitFetcher(token))
+    }
     private val repo=SMOKE_TARGET.repositoryId
     private val mapper=ObjectMapper()
     private fun root(i: GitHubIssueRecord)=config.root.resolve("task-${i.githubIssueId}")
@@ -50,7 +59,7 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             Duration.ofSeconds(seconds.toLong()),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote,
             ownerCorrectionCeiling={ limits(i).maxCorrections },
             stopRequested={ ownerCancelRequested(config.root, i.issueNumber) },
-            fixtureCli=fixtureCli, expectedCodexSha256=config.codexSha256)
+            fixtureCli=fixtureCli, expectedCodexSha256=config.codexSha256, cursor=cursor)
     }
     private fun terminalOrHeld(w: WorkflowSnapshot): TaskProgress = when (w.holdReason) {
         "STAGE_TIMEOUT" -> TaskProgress("timed_out", reason=w.holdReason)
@@ -58,8 +67,14 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         else -> TaskProgress("held", reason=w.holdReason)
     }
     private fun requireSite(i: GitHubIssueRecord) {
-        val site=RemoteWorkflowBridge.site(database(i),"issue-${i.githubIssueId}")
-        check(if(remote==null) site==null else site==remote!!.peer) { "EXECUTION_SITE_CHANGED" }
+        val id="issue-${i.githubIssueId}"
+        val remoteSite=RemoteWorkflowBridge.site(database(i),id)
+        val cursorSite=CursorCloudWorkflowBridge.site(database(i),id)
+        when(config.runtimeMode) {
+            "cursor-cloud" -> check(cursorSite=="api.cursor.com" && remoteSite==null) { "EXECUTION_SITE_CHANGED" }
+            "ssh-vm" -> check(remoteSite==remote!!.peer && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+            else -> check(remoteSite==null && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+        }
     }
     private fun publisher(i: GitHubIssueRecord)=DraftPrPublisher(database(i),root(i).resolve("publisher"),i.baseSha,
         GitHubPublicationApi(publicationHttp),publicationPush,{ plan,_ ->
@@ -93,21 +108,24 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             "owner:personal-service","Local PERSONAL configuration; fixed repository only"))
         store.acceptGitHubIssue(issue,"issue-${issue.githubIssueId}")
         val catalog=SqliteAgentCatalog(database(issue))
-        catalog.declareManifest(AgentCapabilityManifest("codex-cli","openai",1,setOf(AgentRole.CODING,AgentRole.REVIEW),
+        val adapter=if(cursor!=null) "cursor-cloud" else "codex-cli"
+        val provider=if(cursor!=null) "cursor" else "openai"
+        catalog.declareManifest(AgentCapabilityManifest(adapter,provider,1,setOf(AgentRole.CODING,AgentRole.REVIEW),
             setOf(AgentSandbox.NATIVE_PERSONAL_WRITE,AgentSandbox.NATIVE_PERSONAL_READ_ONLY),
             mapOf(config.model to setOf(ReasoningEffort.DEFAULT))),null,"owner:personal-service")
         for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
             val id=role.name.lowercase()
-            catalog.saveProfile(AgentProfile(id,1,repo,role,"codex-cli",1,"openai",config.model,ReasoningEffort.DEFAULT,
+            catalog.saveProfile(AgentProfile(id,1,repo,role,adapter,1,provider,config.model,ReasoningEffort.DEFAULT,
                 if (role==AgentRole.CODING) AgentSandbox.NATIVE_PERSONAL_WRITE else AgentSandbox.NATIVE_PERSONAL_READ_ONLY,
                 StageBudget.MAX_SECONDS,100_000),null,"owner:personal-service")
             catalog.bindRole(repo,role,id,1,null,"owner:personal-service")
         }
-        if(remote==null) for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
+        if(remote==null && cursor==null) for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
             check(NativeCodexCliPreflight(store,catalog).inspect(CodexNativeProbeRequest(repo,role,checkout,
                 issue.baseSha,config.codex,Path.of("/usr/bin/git"))) is CodexProbeResult.FlagsOnly)
         }
         remote?.let { RemoteWorkflowBridge.pin(database(issue),"issue-${issue.githubIssueId}",it.peer) }
+        if(cursor!=null) CursorCloudWorkflowBridge.pin(database(issue),"issue-${issue.githubIssueId}")
         check(CodingAttemptJournal(database(issue)).plan(repo,issue.issueNumber,0,"issue-${issue.githubIssueId}-coding-0",
             checkout,git("rev-parse","HEAD^{tree}"))!=null)
     }
@@ -122,6 +140,8 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         if (Files.isRegularFile(dbFile)) {
             LocalProcessControl.stopOrphans(dbFile)
             if (config.ssh!=null) LocalProcessControl.cancelGuests(dbFile, config.ssh)
+            if (cursor!=null && !CursorCloudWorkflowBridge.cancelOutstanding(dbFile, cursor!!.api))
+                return TaskProgress("held", reason="EFFECT_OR_PROCESS_UNCONFIRMED")
         }
         if (!Files.isRegularFile(dbFile)) return TaskProgress("cancelled", reason="NOT_STARTED")
         val store=SqliteTaskStore(dbFile)

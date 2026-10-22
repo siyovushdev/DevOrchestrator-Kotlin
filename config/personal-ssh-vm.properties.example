@@ -1,3 +1,4 @@
+# Not the product executor. Use personal-cursor-cloud.properties.example.
 # SOURCE EXAMPLE ONLY. Do not deploy/enable without separate Owner GO.
 # Existing canonical private directories/files; Owner-managed config must be mode 600.
 enabled=false

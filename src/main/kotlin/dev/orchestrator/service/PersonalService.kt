@@ -41,6 +41,9 @@ internal class PersonalService(private val file: Path, private val github: Servi
             recorded_at TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL)""")
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_failures(
             id INTEGER PRIMARY KEY, recorded_at TEXT NOT NULL, diagnostic TEXT NOT NULL)""")
+        c.mutate("""CREATE TABLE IF NOT EXISTS personal_exclusions(
+            issue_id INTEGER PRIMARY KEY, number INTEGER NOT NULL UNIQUE,
+            recorded_at TEXT NOT NULL, detail TEXT NOT NULL)""")
     } }
     /** Store types and source locations, never arbitrary exception messages (may contain credentials). */
     fun recordFailure(failure: Exception): String {
@@ -98,8 +101,10 @@ internal class PersonalService(private val file: Path, private val github: Servi
             require(issues.all { it.repositoryId==1424152600L })
             require(issues.groupBy { it.githubIssueId }.values.all { it.size==1 } &&
                 issues.groupBy { it.issueNumber }.values.all { it.size==1 })
+            val excluded=db.read { c -> c.rows("SELECT issue_id,number FROM personal_exclusions") { it.getLong(1) to it.getInt(2) } }
             val next=issues.sortedBy { it.issueNumber }.firstOrNull { i ->
-                i.open && previous.none { it.issue.githubIssueId==i.githubIssueId || it.issue.issueNumber==i.issueNumber } && github.authorized(i)
+                i.open && previous.none { it.issue.githubIssueId==i.githubIssueId || it.issue.issueNumber==i.issueNumber } &&
+                    excluded.none { it.first==i.githubIssueId || it.second==i.issueNumber } && github.authorized(i)
             } ?: return "IDLE"
             check(permitted())
             db.write { it.mutate("INSERT INTO personal_tasks(issue_id,number,source,state) VALUES (?,?,?,'accepted')",
@@ -242,6 +247,26 @@ internal class PersonalService(private val file: Path, private val github: Servi
     }
 
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
+
+    /**
+     * Keeps an authorized issue out of the queue. Does not post, resume, or start an agent.
+     * Issue #6 (5927591593) is excluded this way: its earlier result stays unconfirmed.
+     */
+    fun exclude(number: Int, githubIssueId: Long): String {
+        require(number>0 && githubIssueId>0)
+        requireHealthy()
+        return db.write { c ->
+            val existing=c.rows("SELECT issue_id FROM personal_exclusions WHERE number=?", number) { it.getLong(1) }.singleOrNull()
+            if (existing!=null) return@write if (existing==githubIssueId) "EXCLUDED" else "ID_MISMATCH"
+            val task=c.rows("SELECT issue_id,state FROM personal_tasks WHERE number=?", number) { it.getLong(1) to it.getString(2) }.singleOrNull()
+            if (task!=null) return@write if (task.first==githubIssueId) "ALREADY_PRESENT" else "ID_MISMATCH"
+            c.mutate("INSERT INTO personal_exclusions(issue_id,number,recorded_at,detail) VALUES(?,?,?,?)",
+                githubIssueId, number, Instant.now().toString(), "excluded; no resume; no replay")
+            c.mutate("INSERT INTO owner_audit(recorded_at,actor,action,scope,detail) VALUES(?,?,?,?,?)",
+                Instant.now().toString(), "owner:local-command", "EXCLUDE", "issue:$number", "excluded; no resume; no replay")
+            "EXCLUDED"
+        }
+    }
 
     /** Leaves workflow holds and publication rows in place. Does not delete service.db or send PUSH/POST. */
     fun releaseHeld(number: Int, ssh: dev.orchestrator.remote.SshWorkerConfig? = null): String {

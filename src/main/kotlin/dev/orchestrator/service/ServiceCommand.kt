@@ -16,9 +16,10 @@ internal fun serviceCommand(args: Array<String>) {
 private fun executeServiceCommand(args: Array<String>) {
     val command=args.firstOrNull()
     require((command in setOf("service","run","status","doctor") && args.size==2) ||
-        (command in setOf("cancel","release") && args.size==3) || (command=="limits" && args.size==6) ||
+        (command in setOf("cancel","release") && args.size==3) || (command=="exclude" && args.size==4) ||
+        (command=="limits" && args.size==6) ||
         (command in setOf("check-status","check-remote") && args.size==4) || (command in setOf("resume-status","resume-remote") && args.size==5)) {
-        "Usage: service|run|status|doctor CONFIG; cancel|release CONFIG ISSUE; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
+        "Usage: service|run|status|doctor CONFIG; cancel|release CONFIG ISSUE; exclude CONFIG ISSUE GITHUB_ISSUE_ID; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
     }
     val file=Path.of(args[1]); require(file.isAbsolute)
     val config=PersonalConfig.read(file)
@@ -33,12 +34,26 @@ private fun executeServiceCommand(args: Array<String>) {
         val number=args[2].toInt(); require(number>0)
         println(requestOwnerCancel(config.root.resolve("service.db"), config.root, number))
         stopInFlight(config)
-        println("Отмена записана. Локальный сирота и отдельный SSH-гость получают сигнал остановки. Результат гостя после отмены не импортируется. Повтора публикации нет.")
+        val stopped=when(config.runtimeMode) {
+            "cursor-cloud" -> "активный Cursor run"
+            "ssh-vm" -> "отдельный SSH-гость"
+            else -> "локальный процесс"
+        }
+        println("Отмена записана. $stopped получает сигнал остановки. Результат после отмены не импортируется. Повтора публикации нет.")
         return
     }
     if (command=="release") {
         val number=args[2].toInt(); require(number>0)
         println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).releaseHeld(number, config.ssh))
+        return
+    }
+    if (command=="exclude") {
+        val number=args[2].toInt(); require(number>0)
+        val issueId=args[3].toLong(); require(issueId>0)
+        val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
+        val match=PersonalGitHub(token).issues().singleOrNull { it.issueNumber==number && it.githubIssueId==issueId }
+        if (match==null) throw ServiceStopped("EXCLUDE_ID_MISMATCH")
+        println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).exclude(number, issueId))
         return
     }
     if(args[0]=="status") {
@@ -72,6 +87,11 @@ private fun executeServiceCommand(args: Array<String>) {
             return
         }
         if(config.runtimeMode=="local") dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
+        if(config.runtimeMode=="cursor-cloud") {
+            if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) throw ServiceStopped("CURSOR_AUTH_MISSING")
+            try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable() }
+            catch (_: Exception) { throw ServiceStopped("ISOLATION_UNAVAILABLE") }
+        }
         guardedServiceCall(service) { service.recover(); "RECOVERED" }
         Runtime.getRuntime().addShutdownHook(Thread { try { stopInFlight(config) } catch (_: Exception) {} })
         do {
@@ -117,6 +137,10 @@ internal fun stopInFlight(config: PersonalConfig) {
         val database=dir.resolve("run.db")
         LocalProcessControl.stopOrphans(database)
         if (config.ssh!=null) LocalProcessControl.cancelGuests(database, config.ssh)
+        if (config.runtimeMode=="cursor-cloud") {
+            try { dev.orchestrator.cursor.CursorCloudWorkflowBridge.cancelOutstanding(database, dev.orchestrator.cursor.CursorCloudHttpApi()) }
+            catch (_: Exception) {}
+        }
     }
 }
 
@@ -135,13 +159,16 @@ internal fun diagnose(config: PersonalConfig): String {
     val db=config.root.resolve("service.db")
     val isolation=try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable(); "available" }
         catch (_: Exception) { "unavailable" }
-    val codex=if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
+    val codex=if (config.runtimeMode=="cursor-cloud") "not-used" else if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
+    val cursorKey=if (config.runtimeMode!="cursor-cloud") "not-used" else if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) "unset" else "set"
     val tasks=if (java.nio.file.Files.isRegularFile(db)) readLocalServiceStatus(db) else "No service.db"
     return """enabled=${config.enabled}
 runtime=${config.runtimeMode}
+executor=${if (config.runtimeMode=="cursor-cloud") "cursor-cloud-agents-api" else config.runtimeMode}
 repository=siyovushdev/devorch-kotlin-e2e-smoke id=1424152600
 isolation=$isolation
 codex=$codex
+cursorKey=$cursorKey
 codexSha256=${if (config.codexSha256==null) "unset-elf-size-only" else "pinned"}
 lock=${java.nio.file.Files.exists(config.root.resolve("service.lock"))}
 $tasks"""

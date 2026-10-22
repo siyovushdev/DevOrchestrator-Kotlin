@@ -1,0 +1,21 @@
+# Product executor. Copy outside every checkout and agentHome. chmod 600 before use.
+# enabled stays false until a separate Owner GO. This file never contains a token.
+enabled=false
+runtimeMode=cursor-cloud
+repository=siyovushdev/devorch-kotlin-e2e-smoke
+repositoryId=1424152600
+owner=siyovushdev
+# Existing canonical directories, mode 700, owned by devorch-e2e, not nested.
+root=/home/devorch-e2e/personal-service/state
+agentHome=/home/devorch-e2e/personal-service/agent-home
+# account-default omits model.id and lets the Cursor account choose.
+# Any other value must match [A-Za-z0-9][A-Za-z0-9._:/+-]{0,127} and is sent as model.id.
+model=account-default
+minimumTests=1
+pollSeconds=90
+# Do not set codex, codexSha256, sshIdentityFile, or sshKnownHosts.
+# CURSOR_API_KEY and DEVORCH_PERSONAL_TOKEN belong only in the process environment.
+# Limits are not stored here:
+#   dev-orchestrator-kotlin limits /absolute/personal.properties default 2 1200 1200
+#   dev-orchestrator-kotlin exclude /absolute/personal.properties 6 5927591593
+#   dev-orchestrator-kotlin cancel /absolute/personal.properties ISSUE

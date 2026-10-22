@@ -8,7 +8,8 @@
 | ADR-002 | Task lifecycle и recovery | **APPROVED** | R-01–R-06 согласованы 2026-10-17; таблицы переходов/F01–F20. Детали механизмов — ADR-003/004/005 |
 | ADR-003 | Native PERSONAL MVP trust boundary | **APPROVED (limited scope)** | [Native-only policy](adr/ADR-003-native-personal-mvp.md); WORK/1MT denied; Docker archived |
 | ADR-004 | GitHub intake/publication/PR identity | **APPROVED** | [MVP polling / scoped Draft PR](adr/ADR-004-github-mvp-DRAFT.md); actual E2E deferred to M3 |
-| ADR-005 | Agent Adapter/Review/Profiles | **APPROVED** | [Codex exec + independent Review](adr/ADR-005-agent-adapters-mvp-DRAFT.md); second adapter in M4 |
+| ADR-005 | Agent Adapter/Review/Profiles | **APPROVED** | [Codex exec + independent Review](adr/ADR-005-agent-adapters-mvp-DRAFT.md); второй адаптер заменён ADR-006 |
+| ADR-006 | Cursor Cloud Agents API | **Принято для этого контура** | [Coding и Review — две сессии Cloud Agents API](adr/ADR-006-cursor-cloud-agents.md). Codex CLI и SSH не исполнители |
 
 ## Правило статусов
 
