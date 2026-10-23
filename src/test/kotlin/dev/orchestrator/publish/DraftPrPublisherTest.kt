@@ -88,16 +88,16 @@ class DraftPrPublisherTest {
             mapOf("pid" to "100","start_ticks" to "10","boot_id" to "mock-boot","machine_id" to "mock-machine")))))
         Files.writeString(source.resolve("README"),"reviewed result\n")
         Files.createDirectory(source.resolve("src")); Files.writeString(source.resolve("src/add.py"),"def add(a,b): return a+b\n")
+        git(source,"add","--all"); tree=git(source,"write-tree")
         if (bytecode) {
             val sourceCache=Files.createDirectories(source.resolve("src/__pycache__"))
-            Files.write(sourceCache.resolve("suffix_bang.cpython-312.pyc"),
-                "co_filename=/home/controller/checkout/src/suffix_bang.py".toByteArray())
+            Files.write(sourceCache.resolve("hash_prefix.cpython-312.pyc"),
+                "co_filename=/home/controller/checkout/src/hash_prefix.py".toByteArray())
             Files.createDirectories(source.resolve("tests"))
             val testCache=Files.createDirectories(source.resolve("tests/__pycache__"))
-            Files.write(testCache.resolve("test_suffix_bang.cpython-312.pyc"),
-                "co_filename=/home/controller/checkout/tests/test_suffix_bang.py".toByteArray())
+            Files.write(testCache.resolve("test_hash_prefix.cpython-312.pyc"),
+                "co_filename=/home/controller/checkout/tests/test_hash_prefix.py".toByteArray())
         }
-        git(source,"add","--all"); tree=git(source,"write-tree")
         Files.writeString(temp.resolve("coding-artifacts/events.log"),"{\"type\":\"thread.started\",\"thread_id\":\"coding-session\"}\n{\"type\":\"turn.completed\"}\n")
         Files.writeString(temp.resolve("review-artifacts/events.log"),"{\"type\":\"thread.started\",\"thread_id\":\"review-session\"}\n{\"type\":\"turn.completed\"}\n")
         val completion=mapOf("attempt_id" to "coding","observed" to clean(),"candidate_tree" to tree,"base_sha" to base,
@@ -179,7 +179,7 @@ class DraftPrPublisherTest {
         assertEquals("DRAFT_PR_CREATED",result.status)
         val plan=journal.findPlan("wf")!!
         val published=git(temp,"--git-dir=$bare","show","-s","--format=%T",plan.commitSha)
-        assertNotEquals(tree,published)
+        assertEquals(tree,published)
         assertEquals(plan.commitTree,published)
         assertEquals(tree,plan.candidateTree)
         val names=git(temp,"--git-dir=$bare","ls-tree","-r","--name-only",published)
@@ -191,6 +191,16 @@ class DraftPrPublisherTest {
         assertEquals(authored,committed)
         assertNotEquals("0",authored)
         assertTrue(authored.toLong() in (Instant.now().epochSecond-300)..Instant.now().epochSecond)
+    }
+    @Test fun `a non-bytecode tree mismatch holds without a commit`() {
+        fixture()
+        Files.writeString(candidate.filesDirectory.resolve("README"),"tampered source\n")
+        assertEquals("GUARD_OR_INPUT_DENIED",publisher().publish().status)
+        assertFalse(Files.exists(root.resolve("wf/commit.txt")))
+        assertEquals(WorkflowPhase.READY_FOR_PR,phase().phase)
+        assertEquals(0,sends)
+        assertEquals(0,posts)
+        assertNull(journal.findPlan("wf"))
     }
     @Test fun publishesExactSavedTreeAndOneDraftThenRestartHasNoWrites() {
         fixture(); val originalIndex=Files.readAllBytes(source.resolve(".git/index"))

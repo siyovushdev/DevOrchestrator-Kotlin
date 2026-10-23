@@ -297,10 +297,11 @@ internal class DraftPrPublisher(
         local(dir,"--work-tree=${e.candidate.filesDirectory}","read-tree","--empty")
         command(e.candidate.filesDirectory,listOf("--git-dir=${dir.resolve("objects.git")}",
             "--work-tree=${e.candidate.filesDirectory}","-c","core.hooksPath=/dev/null","add","--force","--all","--","."))
-        check(local(dir,"write-tree")==e.candidate.binding.candidateTree && e.candidate.isIntact())
         val bytecode=local(dir,"ls-files").lineSequence().filter { it.isNotBlank() && isUnpublishedPythonBytecode(it) }.toList()
         for (path in bytecode) local(dir,"rm","--cached","--",path)
-        return local(dir,"write-tree")
+        val published=local(dir,"write-tree")
+        check(published==e.candidate.binding.candidateTree && e.candidate.isIntact())
+        return published
     }
     private fun localCommit(plan: PublicationPlan): PublicationReadBack.Commit {
         val dir=publisherRoot.resolve(plan.workflowId)
