@@ -356,7 +356,11 @@ def kill_process_tree(pid, seen=None):
 
 
 def publish_terminal(attempt, state, code):
-    """Timeout and cancel close the claim. A later FINISHED result cannot replace it."""
+    """Timeout and cancel close the claim. A later FINISHED result cannot replace it.
+
+    failure.json is linked before result.json. serve() must not exit between them:
+    the guest dies with this process and would otherwise leave no result.json.
+    """
     if (attempt / 'result.json').is_file():
         return
     payload = encoded({'state': state, 'code': code})
@@ -599,7 +603,16 @@ def serve(c, config_path):
             publish_terminal(attempt, 'CANCELLED', 'CLIENT_DEAD')
             return {'state': 'CANCELLED', 'code': 'CLIENT_DEAD'}
         result = query(root, i['attemptId'], sha(data))
-        if result.get('state') in ('FINISHED', 'TIMEOUT', 'CANCELLED') or (attempt / 'failure.json').exists():
+        state = result.get('state')
+        # failure.json is published before result.json. Exiting on the first file
+        # SIGKILLs the guest (PR_SET_PDEATHSIG) and drops the timeout receipt.
+        if state == 'FINISHED' or (
+            state in ('TIMEOUT', 'CANCELLED')
+            and (attempt / 'result.json').is_file()
+            and (attempt / 'failure.json').is_file()
+        ):
+            return result
+        if (attempt / 'failure.json').exists() and state not in ('TIMEOUT', 'CANCELLED'):
             return result
         time.sleep(0.05)
     return query(root, i['attemptId'], sha(data))
