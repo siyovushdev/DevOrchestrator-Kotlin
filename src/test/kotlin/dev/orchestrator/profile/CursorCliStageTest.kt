@@ -72,6 +72,63 @@ class CursorCliStageTest {
         assertEquals(listOf("FINISHED", "FINISHED"), states)
     }
 
+    @Test fun `a bytecode-only review hold continues without a second reviewer`() {
+        val cli = fixture("success")
+        val log = temp.resolve("agent.log")
+        val world = runtime(cli, null)
+        world.runtime.prepare(world.issue)
+        assertEquals("tests", world.runtime.step(world.issue).stage)
+        val untested = Files.walk(world.task.resolve("artifacts")).use { stream ->
+            stream.filter { it.fileName.toString() == "untested" && Files.isDirectory(it) }.findFirst().orElseThrow()
+        }
+        Files.createDirectories(untested.resolve("files/src/__pycache__"))
+        Files.createDirectories(untested.resolve("files/tests/__pycache__"))
+        Files.write(untested.resolve("files/src/__pycache__/is_blank.cpython-310.pyc"), byteArrayOf(1, 2, 3))
+        Files.write(untested.resolve("files/tests/__pycache__/test_is_blank.cpython-310.pyc"), byteArrayOf(4, 5, 6))
+        assertEquals("review", world.runtime.step(world.issue).stage)
+        assertEquals(1, Files.readAllLines(log).size)
+        val db = RuntimeDatabase(world.task.resolve("run.db"))
+        val mapper = ObjectMapper()
+        val verified = mapper.readTree(db.read { c -> c.rows("SELECT evidence FROM workflow_verifications") { it.getString(1) }.single() })
+        val workflow = db.read { c -> c.rows("SELECT workflow_id, corrections_used FROM workflows") { it.getString(1) to it.getInt(2) }.single() }
+        val candidateDir = Path.of(verified.path("directory").asText())
+        Files.write(candidateDir.resolve("files/src/__pycache__/is_blank.cpython-310.pyc"), byteArrayOf(9, 9, 9, 9))
+        Files.write(candidateDir.resolve("files/tests/__pycache__/test_is_blank.cpython-310.pyc"), byteArrayOf(8, 8, 8))
+        val sourceFile = candidateDir.resolve("files/clamp.py")
+        val original = Files.readString(sourceFile)
+        Files.writeString(sourceFile, "tampered source\n")
+        val reviewId = "${workflow.first}-review-${workflow.second}"
+        val detail = mapper.createObjectNode()
+        val receipt = detail.putObject("receipt")
+        receipt.put("candidateId", verified.path("candidateId").asText())
+        receipt.put("reviewerAttemptId", reviewId)
+        receipt.put("reviewerSessionId", "review-session")
+        receipt.put("candidateManifestSha256", verified.path("manifestSha256").asText())
+        receipt.put("candidateTree", verified.path("candidateTree").asText())
+        receipt.put("codingGeneration", workflow.second)
+        receipt.put("verdict", "PASS")
+        detail.putArray("findings")
+        db.write { c ->
+            c.mutate("UPDATE workflows SET hold='NEEDS_OWNER', hold_reason='CORRECTION_LIMIT_OR_REVIEW_BINDING' WHERE workflow_id=?", workflow.first)
+            c.mutate("INSERT INTO agent_attempts(attempt_id,workflow_id,role,generation,state,source_tree,recorded_at) VALUES (?,?,'REVIEW',?,'SUCCEEDED',?,?)",
+                reviewId, workflow.first, workflow.second, verified.path("candidateTree").asText(), "t")
+            c.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES (?, 'REVIEW_COMPLETED', ?, 't')",
+                workflow.first, mapper.writeValueAsString(detail))
+        }
+        assertFalse(world.runtime.continueBytecodeReviewHold(world.issue))
+        assertEquals("REVIEWING", db.read { c -> c.rows("SELECT phase FROM workflows") { it.getString(1) }.single() })
+        assertEquals("CORRECTION_LIMIT_OR_REVIEW_BINDING", db.read { c -> c.rows("SELECT hold_reason FROM workflows") { it.getString(1) }.single() })
+        Files.writeString(sourceFile, original)
+        assertTrue(world.runtime.continueBytecodeReviewHold(world.issue))
+        assertEquals("READY_FOR_PR", db.read { c -> c.rows("SELECT phase FROM workflows") { it.getString(1) }.single() })
+        assertEquals("NONE", db.read { c -> c.rows("SELECT hold FROM workflows") { it.getString(1) }.single() })
+        assertEquals(1, Files.readAllLines(log).size)
+        assertEquals(1, db.read { c -> c.rows("SELECT 1 FROM agent_attempts WHERE role='REVIEW'") { 1 }.size })
+        assertEquals("SUCCEEDED", db.read { c -> c.rows("SELECT state FROM agent_attempts WHERE role='REVIEW'") { it.getString(1) }.single() })
+        world.runtime.step(world.issue)
+        assertEquals(1, Files.readAllLines(log).size)
+    }
+
     @Test fun `a saved exit zero review is imported on the next step without a second spawn`() {
         val cli = fixture("success")
         val log = temp.resolve("agent.log")

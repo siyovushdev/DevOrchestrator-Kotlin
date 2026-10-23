@@ -24,6 +24,8 @@ internal interface TaskRuntime {
     fun recover(issue: GitHubIssueRecord)
     fun step(issue: GitHubIssueRecord): TaskProgress
     fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume = ReviewResume.NOT_APPLICABLE
+    /** True when a bytecode-only review hold was cleared and the saved PASS review may publish. */
+    fun continueBytecodeReviewHold(issue: GitHubIssueRecord): Boolean = false
     /** True only when a succeeded review is already waiting for the single Draft PR. */
     fun publicationReady(issue: GitHubIssueRecord): Boolean = false
     fun cancel(issue: GitHubIssueRecord): TaskProgress = TaskProgress("cancelled", reason="NOT_STARTED")
@@ -236,6 +238,10 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume {
         if (cli == null || !Files.isRegularFile(database(issue))) return ReviewResume.NOT_APPLICABLE
         return engine(issue).resumeCliReview(issue.issueNumber)
+    }
+    override fun continueBytecodeReviewHold(issue: GitHubIssueRecord): Boolean {
+        if (!Files.isRegularFile(database(issue))) return false
+        return try { engine(issue).continueBytecodeReviewHold(issue.issueNumber) } catch (_: Exception) { false }
     }
     override fun step(issue: GitHubIssueRecord): TaskProgress {
         check(permitted(issue))

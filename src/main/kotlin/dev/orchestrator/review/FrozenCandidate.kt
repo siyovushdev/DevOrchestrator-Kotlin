@@ -61,7 +61,8 @@ internal class FrozenCandidate private constructor(
         canonicalDirectory(directory)
         val manifest = boundedBytes(directory.resolve("manifest"), MAX_MANIFEST)
         directory.fileName.toString() == candidateId &&
-            sha256(manifest) == manifestSha256 && inventory(filesDirectory) == expectedFiles &&
+            sha256(manifest) == manifestSha256 &&
+            sourceInventory(inventory(filesDirectory)) == sourceInventory(expectedFiles) &&
             Files.list(directory).use { paths -> paths.map { it.fileName.toString() }.toList().toSet() } ==
                 setOf("files", "manifest")
     } catch (_: Exception) { false }
@@ -146,6 +147,10 @@ internal class FrozenCandidate private constructor(
             require(files.values.sumOf { it.size } <= MAX_TOTAL_BYTES)
             return FrozenCandidate(candidateId,directory,binding,expectedManifestSha256,files.toMap()).also { require(it.isIntact()) }
         }
+
+        /** Publication drops these before write-tree. A later rewrite is not a source change. */
+        private fun sourceInventory(files: Map<String, FileDigest>): Map<String, FileDigest> =
+            files.filterKeys { !isUnpublishedPythonBytecode(it) }
 
         private fun inventory(root: Path, skipRootGit: Boolean = false, selectedPaths: Set<String>? = null): Map<String,FileDigest> {
             canonicalDirectory(root)

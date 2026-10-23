@@ -46,6 +46,29 @@ class FrozenCandidateTest {
             reopened,receipt(reopened),reopened.manifestSha256,0,2))
     }
 
+    @Test fun rewrittenPythonBytecodeDoesNotBlockAPassingReview() {
+        val source = source()
+        Files.createDirectories(source.resolve("src/__pycache__"))
+        Files.createDirectories(source.resolve("tests/__pycache__"))
+        Files.write(source.resolve("src/__pycache__/is_blank.cpython-310.pyc"), byteArrayOf(1, 2, 3))
+        Files.write(source.resolve("tests/__pycache__/test_is_blank.cpython-310.pyc"), byteArrayOf(4, 5, 6))
+        val candidate = capture(source)
+        Files.write(candidate.filesDirectory.resolve("src/__pycache__/is_blank.cpython-310.pyc"), byteArrayOf(9, 9, 9, 9))
+        Files.write(candidate.filesDirectory.resolve("tests/__pycache__/test_is_blank.cpython-310.pyc"), byteArrayOf(8, 8, 8))
+        assertTrue(candidate.isIntact())
+        val reopened = FrozenCandidate.reopen(candidate.directory, candidate.manifestSha256)
+        assertEquals(ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS, ReviewEvidencePolicy.evaluate(
+            reopened, receipt(reopened), reopened.manifestSha256, 0, 2))
+        val sourceFile = candidate.filesDirectory.resolve("src/main.kt")
+        val original = Files.readString(sourceFile)
+        Files.writeString(sourceFile, "tampered source\n")
+        assertFalse(candidate.isIntact())
+        assertEquals(ReviewDisposition.NEEDS_OWNER, ReviewEvidencePolicy.evaluate(
+            candidate, receipt(candidate), candidate.manifestSha256, 0, 2))
+        Files.writeString(sourceFile, original)
+        assertTrue(candidate.isIntact())
+    }
+
     @Test fun modifiedMissingExtraFilesAndModeChangesInvalidateReview() {
         val candidate = capture()
         val file = candidate.filesDirectory.resolve("src/main.kt")

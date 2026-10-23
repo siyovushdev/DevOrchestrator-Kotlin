@@ -96,6 +96,16 @@ internal class PersonalService(private val file: Path, private val github: Servi
             Instant.parse(n["sourceUpdatedAt"].asText()),n["title"].asText(),n["body"].asText(),n["baseSha"].asText(),true),
             it.getString(2),it.getString(3),it.getString(4),it.getString(5))
     } }
+    private fun continueBytecodeReviewHold() {
+        val held = try { tasks().filter { it.state=="held" && it.reason=="CORRECTION_LIMIT_OR_REVIEW_BINDING" } } catch (_: Exception) { return }
+        for (task in held) {
+            if (!runtime.continueBytecodeReviewHold(task.issue)) continue
+            db.write { c ->
+                c.mutate("""UPDATE personal_tasks SET state='active', stage='review', reason=NULL
+                    WHERE issue_id=? AND state='held' AND reason='CORRECTION_LIMIT_OR_REVIEW_BINDING'""", task.issue.githubIssueId)
+            }
+        }
+    }
     private fun resumeInterruptedReview() {
         val held = try { tasks().filter { it.state=="held" && it.reason=="INTERNAL_ACTION_ERROR" } } catch (_: Exception) { return }
         if (held.isEmpty()) return
@@ -132,6 +142,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
     fun recover() {
         acknowledgeRecoveredPublication()
         resumeInterruptedReview()
+        continueBytecodeReviewHold()
         requireHealthy()
         for(t in tasks()) {
             if (t.stage in terminalStages) continue
@@ -147,6 +158,7 @@ internal class PersonalService(private val file: Path, private val github: Servi
     fun tick(): String {
         acknowledgeRecoveredPublication()
         resumeInterruptedReview()
+        continueBytecodeReviewHold()
         requireHealthy()
         if(!permitted()) return "OFF"
         // An unresolved task blocks the entire one-worker queue, including different task databases.

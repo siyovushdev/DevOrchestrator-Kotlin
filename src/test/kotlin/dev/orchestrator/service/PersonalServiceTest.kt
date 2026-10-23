@@ -24,7 +24,9 @@ class PersonalServiceTest {
     private var progress=TaskProgress("tests")
     private var resume=ReviewResume.NOT_APPLICABLE
     private var ready=false
-    private var resumes=0
+        private var resumes=0
+        private var bytecodeHolds=0
+        private var acceptBytecode=false
     private var records=listOf(issue())
     private val github=object: ServiceGitHub {
         override fun issues()=records
@@ -38,6 +40,7 @@ class PersonalServiceTest {
         override fun recover(issue: GitHubIssueRecord) { recoveries++ }
         override fun step(issue: GitHubIssueRecord): TaskProgress { steps++; if(crashStep) throw SimulatedCrash(); return progress }
         override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume { resumes++; return resume }
+        override fun continueBytecodeReviewHold(issue: GitHubIssueRecord): Boolean { bytecodeHolds++; return acceptBytecode }
         override fun publicationReady(issue: GitHubIssueRecord)=ready
     }
     private class SimulatedCrash: Error()
@@ -79,6 +82,22 @@ class PersonalServiceTest {
         assertEquals(0, recoveries)
         assertEquals(0, RuntimeDatabase(database).read { c -> c.rows("SELECT 1 FROM personal_failure_audit") { 1 }.size })
         assertEquals(1, RuntimeDatabase(database).read { c -> c.rows("SELECT 1 FROM personal_failures") { 1 }.size })
+    }
+
+    @Test fun `a bytecode-only review hold continues on the next tick without release`() {
+        val s=service(); assertEquals("ACTIVE", s.tick())
+        RuntimeDatabase(database).write { c ->
+            c.mutate("UPDATE personal_tasks SET state='held', stage='held', reason='CORRECTION_LIMIT_OR_REVIEW_BINDING'")
+        }
+        assertEquals("NEEDS_OWNER", s.tick())
+        assertEquals(1, bytecodeHolds)
+        assertEquals(0, steps)
+        acceptBytecode=true
+        progress=TaskProgress("done", "https://github.com/siyovushdev/devorch-kotlin-e2e-smoke/pull/12")
+        assertEquals("DONE", s.tick())
+        assertEquals(2, bytecodeHolds)
+        assertEquals(1, steps)
+        assertEquals("done", RuntimeDatabase(database).read { c -> c.rows("SELECT state FROM personal_tasks") { it.getString(1) }.single() })
     }
 
     @Test fun `an internal review parse hold is imported on the next tick without release`() {

@@ -365,6 +365,53 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     }
     fun resumeCliReview(issueNumber: Int): dev.orchestrator.profile.ReviewResume =
         cliBridge?.resumeSaved(issueNumber) ?: dev.orchestrator.profile.ReviewResume.NOT_APPLICABLE
+
+    /**
+     * A PASS review already stored, held only because bytecode bytes changed, may move to the
+     * single Draft PR. This does not spawn a reviewer and does not clear any other hold.
+     */
+    fun continueBytecodeReviewHold(issueNumber: Int): Boolean {
+        val w = store.findWorkflow(repositoryId, issueNumber) ?: return false
+        if (w.phase != WorkflowPhase.REVIEWING || w.hold != WorkflowHold.NEEDS_OWNER ||
+            w.holdReason != "CORRECTION_LIMIT_OR_REVIEW_BINDING") return false
+        val states = db.read { c ->
+            c.rows("SELECT state FROM agent_attempts WHERE workflow_id=? AND role='REVIEW'", w.id) { it.getString(1) }
+        }
+        if (states.any { it in setOf("PLANNED", "STARTING", "RUNNING") } || states.none { it == "SUCCEEDED" }) return false
+        val launching = db.read { c ->
+            val present = c.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cli_stage_runs'") { 1 }.isNotEmpty()
+            present && c.rows("SELECT 1 FROM cli_stage_runs WHERE workflow_id=? AND state='LAUNCHING'", w.id) { 1 }.isNotEmpty()
+        }
+        if (launching) return false
+        val verified = verification(w.id, w.correctionsUsed) ?: return false
+        val candidate = try { FrozenCandidate.reopen(Path.of(verified.directory), verified.manifestSha256) } catch (_: Exception) { return false }
+        val detail = db.read { c ->
+            c.rows("""SELECT detail FROM workflow_events WHERE workflow_id=? AND event_type='REVIEW_COMPLETED'
+                ORDER BY event_id DESC LIMIT 1""", w.id) { it.getString(1) }.singleOrNull()
+        } ?: return false
+        val saved = try { mapper.readTree(detail) } catch (_: Exception) { return false }
+        val findings = saved.path("findings")
+        if (!findings.isArray || findings.any { !it.isTextual || it.asText().isBlank() }) return false
+        val verdict = try { ReviewVerdict.valueOf(saved.path("receipt").path("verdict").asText()) } catch (_: Exception) { return false }
+        if (verdict != ReviewVerdict.PASS || findings.size() != 0) return false
+        val receipt = try {
+            val node = saved.path("receipt")
+            ReviewReceipt(node.path("candidateId").asText(), node.path("reviewerAttemptId").asText(),
+                node.path("reviewerSessionId").asText(), node.path("candidateManifestSha256").asText(),
+                node.path("candidateTree").asText(), node.path("codingGeneration").asInt(-1), verdict)
+        } catch (_: Exception) { return false }
+        val disposition = try {
+            ReviewEvidencePolicy.evaluate(candidate, receipt, candidate.manifestSha256, w.correctionsUsed, limit(w.id, w.correctionsUsed))
+        } catch (_: Exception) { return false }
+        if (disposition != ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS) return false
+        return db.write { c ->
+            val changed = c.mutate("""UPDATE workflows SET phase='READY_FOR_PR', hold='NONE', hold_reason=NULL, version=version+1, updated_at=?
+                WHERE workflow_id=? AND phase='REVIEWING' AND hold='NEEDS_OWNER' AND hold_reason='CORRECTION_LIMIT_OR_REVIEW_BINDING'""",
+                now(), w.id)
+            if (changed == 1) event(c, w.id, "REVIEW_SOURCE_INTACT", "bytecode ignored")
+            changed == 1
+        }
+    }
     fun checkRemote(id: String): String = cursorBridge?.check(id) ?: requireNotNull(remoteBridge).checkRemote(id)
     fun resumeRemote(id: String,digest: String): Boolean = cursorBridge?.resume(id,digest) ?: requireNotNull(remoteBridge).resume(id,digest)
 
