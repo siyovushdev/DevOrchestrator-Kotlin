@@ -7,6 +7,15 @@ import java.nio.file.Path
 /** Explicit CLI only. Normal bootstrap and CI never start the autonomous worker. */
 internal class ServiceStopped(message: String) : IllegalStateException(message)
 
+/**
+ * The default CLI subscription runs as the already logged-in user.
+ * ssh-vm, local Codex, and cloud-api keep the dedicated account.
+ */
+internal fun requireDedicatedPersonalAccount(config: PersonalConfig, userName: String = System.getProperty("user.name")) {
+    if (config.runtimeMode == "cursor-cli" && config.selectedProfile() == "default") return
+    check(userName == "devorch-e2e") { "Dedicated PERSONAL account required" }
+}
+
 internal fun serviceCommand(args: Array<String>) {
     try { executeServiceCommand(args) }
     catch (failure: ServiceStopped) { throw failure }
@@ -16,9 +25,10 @@ internal fun serviceCommand(args: Array<String>) {
 private fun executeServiceCommand(args: Array<String>) {
     val command=args.firstOrNull()
     require((command in setOf("service","run","status","doctor") && args.size==2) ||
-        (command in setOf("cancel","release") && args.size==3) || (command=="limits" && args.size==6) ||
+        (command in setOf("cancel","release") && args.size==3) || (command=="exclude" && args.size==4) ||
+        (command=="limits" && args.size==6) ||
         (command in setOf("check-status","check-remote") && args.size==4) || (command in setOf("resume-status","resume-remote") && args.size==5)) {
-        "Usage: service|run|status|doctor CONFIG; cancel|release CONFIG ISSUE; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
+        "Usage: service|run|status|doctor CONFIG; cancel|release CONFIG ISSUE; exclude CONFIG ISSUE GITHUB_ISSUE_ID; limits CONFIG default|ISSUE MAX CODING_SECONDS REVIEW_SECONDS; check-status CONFIG ISSUE STAGE; resume-status CONFIG ISSUE STAGE COMMENT_ID; check-remote CONFIG ISSUE ATTEMPT; resume-remote CONFIG ISSUE ATTEMPT EVIDENCE_SHA256"
     }
     val file=Path.of(args[1]); require(file.isAbsolute)
     val config=PersonalConfig.read(file)
@@ -33,12 +43,27 @@ private fun executeServiceCommand(args: Array<String>) {
         val number=args[2].toInt(); require(number>0)
         println(requestOwnerCancel(config.root.resolve("service.db"), config.root, number))
         stopInFlight(config)
-        println("Отмена записана. Локальный сирота и отдельный SSH-гость получают сигнал остановки. Результат гостя после отмены не импортируется. Повтора публикации нет.")
+        val stopped=when(config.runtimeMode) {
+            "cursor-cloud" -> "активный Cursor run"
+            "cursor-cli" -> "процесс Cursor CLI"
+            "ssh-vm" -> "отдельный SSH-гость"
+            else -> "локальный процесс"
+        }
+        println("Отмена записана. $stopped получает сигнал остановки. Результат после отмены не импортируется. Повтора публикации нет.")
         return
     }
     if (command=="release") {
         val number=args[2].toInt(); require(number>0)
         println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).releaseHeld(number, config.ssh))
+        return
+    }
+    if (command=="exclude") {
+        val number=args[2].toInt(); require(number>0)
+        val issueId=args[3].toLong(); require(issueId>0)
+        val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
+        val match=PersonalGitHub(token).issues().singleOrNull { it.issueNumber==number && it.githubIssueId==issueId }
+        if (match==null) throw ServiceStopped("EXCLUDE_ID_MISMATCH")
+        println(PersonalService(config.root.resolve("service.db"), idleGitHub(), idleRuntime(), { true }).exclude(number, issueId))
         return
     }
     if(args[0]=="status") {
@@ -53,7 +78,7 @@ private fun executeServiceCommand(args: Array<String>) {
     }
     ServiceLock(config.root).use {
         if(!config.enabled && command !in setOf("resume-status","check-remote","resume-remote")) { println("PERSONAL autonomy OFF"); return }
-        check(System.getProperty("user.name")=="devorch-e2e") { "Dedicated PERSONAL account required" }
+        requireDedicatedPersonalAccount(config)
         val token=requireNotNull(System.getenv("DEVORCH_PERSONAL_TOKEN")) { "PERSONAL scoped token required" }
         val github=PersonalGitHub(token)
         val permitted={ PersonalConfig.read(file)==config && config.enabled }
@@ -72,6 +97,12 @@ private fun executeServiceCommand(args: Array<String>) {
             return
         }
         if(config.runtimeMode=="local") dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable()
+        if(config.runtimeMode=="cursor-cli") check(config.profileId=="default")
+        if(config.runtimeMode=="cursor-cloud") {
+            if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) throw ServiceStopped("CURSOR_AUTH_MISSING")
+            try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable() }
+            catch (_: Exception) { throw ServiceStopped("ISOLATION_UNAVAILABLE") }
+        }
         guardedServiceCall(service) { service.recover(); "RECOVERED" }
         Runtime.getRuntime().addShutdownHook(Thread { try { stopInFlight(config) } catch (_: Exception) {} })
         do {
@@ -94,8 +125,14 @@ internal fun readLocalServiceStatus(database: Path): String {
         if (!table("personal_tasks")) return describeOwnerControls(database).ifBlank { "No tasks" }
         val failures=c.createStatement().use { statement ->
             val exists=statement.executeQuery("SELECT 1 FROM sqlite_master WHERE name='personal_failures'").use { it.next() }
-            if (exists) statement.executeQuery("SELECT diagnostic FROM personal_failures ORDER BY id").use { r ->
-                buildList { while(r.next()) add("SERVICE_STOPPED_REQUIRES_OWNER: ${r.getString(1)}") }.joinToString("\n")
+            if (exists) {
+                val audited=statement.executeQuery("SELECT 1 FROM sqlite_master WHERE name='personal_failure_audit'").use { it.next() }
+                val sql=if (audited) """SELECT f.diagnostic FROM personal_failures f
+                    WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id) ORDER BY f.id"""
+                    else "SELECT diagnostic FROM personal_failures ORDER BY id"
+                statement.executeQuery(sql).use { r ->
+                    buildList { while(r.next()) add("SERVICE_STOPPED_REQUIRES_OWNER: ${r.getString(1)}") }.joinToString("\n")
+                }
             } else ""
         }
         val tasks=c.createStatement().use { statement ->
@@ -117,6 +154,10 @@ internal fun stopInFlight(config: PersonalConfig) {
         val database=dir.resolve("run.db")
         LocalProcessControl.stopOrphans(database)
         if (config.ssh!=null) LocalProcessControl.cancelGuests(database, config.ssh)
+        if (config.runtimeMode=="cursor-cloud") {
+            try { dev.orchestrator.cursor.CursorCloudWorkflowBridge.cancelOutstanding(database, dev.orchestrator.cursor.CursorCloudHttpApi()) }
+            catch (_: Exception) {}
+        }
     }
 }
 
@@ -133,15 +174,21 @@ private fun idleRuntime(): TaskRuntime = object: TaskRuntime {
 
 internal fun diagnose(config: PersonalConfig): String {
     val db=config.root.resolve("service.db")
-    val isolation=try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable(); "available" }
+    val isolation=if (config.runtimeMode=="cursor-cli") "not-required" else try { dev.orchestrator.agent.nativecli.LinuxIsolation.requireAvailable(); "available" }
         catch (_: Exception) { "unavailable" }
-    val codex=if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
+    val codex=if (config.runtimeMode=="cursor-cloud" || config.runtimeMode=="cursor-cli") "not-used" else if (java.nio.file.Files.isExecutable(config.codex)) "executable" else "missing"
+    val cursorKey=if (config.runtimeMode!="cursor-cloud") "not-required" else if (System.getenv("CURSOR_API_KEY").isNullOrBlank()) "unset" else "set"
+    val cli=if (config.cursorCli==null) "not-used" else if (java.nio.file.Files.isExecutable(config.cursorCli)) "executable" else "missing"
     val tasks=if (java.nio.file.Files.isRegularFile(db)) readLocalServiceStatus(db) else "No service.db"
     return """enabled=${config.enabled}
 runtime=${config.runtimeMode}
+profile=${config.profileId}
+executor=${when(config.profileId) { "default" -> "cursor-cli"; "cloud-api" -> "cursor-cloud-agents-api"; else -> config.runtimeMode }}
 repository=siyovushdev/devorch-kotlin-e2e-smoke id=1424152600
 isolation=$isolation
 codex=$codex
+cursorCli=$cli
+cursorKey=$cursorKey
 codexSha256=${if (config.codexSha256==null) "unset-elf-size-only" else "pinned"}
 lock=${java.nio.file.Files.exists(config.root.resolve("service.lock"))}
 $tasks"""
@@ -173,7 +220,8 @@ internal fun checkSavedStatus(database: Path, github: ServiceGitHub, number: Int
             WHERE t.number=? AND s.stage=? AND
             ((t.state='held' AND t.reason='STATUS_OUTCOME_UNKNOWN' AND s.state='uncertain') OR
              (s.state='sending' AND t.state IN ('accepted','active','done')))
-            AND NOT EXISTS(SELECT 1 FROM personal_failures)""").use { query ->
+            AND NOT EXISTS(SELECT 1 FROM personal_failures f
+                WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id))""").use { query ->
             query.setInt(1,number); query.setString(2,stage)
             query.executeQuery().use { rows ->
                 if (!rows.next()) return@use null

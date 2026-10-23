@@ -5,6 +5,13 @@ import dev.orchestrator.agent.nativecli.*
 import dev.orchestrator.publish.*
 import dev.orchestrator.storage.*
 import dev.orchestrator.workflow.*
+import dev.orchestrator.profile.CursorCliSettings
+import dev.orchestrator.profile.ExecutionProfileCatalog
+import dev.orchestrator.profile.ReviewResume
+import dev.orchestrator.cursor.CursorCloudHttpApi
+import dev.orchestrator.cursor.CursorCloudSettings
+import dev.orchestrator.cursor.CursorCloudWorkflowBridge
+import dev.orchestrator.cursor.PersonalGitFetcher
 import dev.orchestrator.remote.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.nio.file.Files
@@ -16,6 +23,11 @@ internal interface TaskRuntime {
     fun prepare(issue: GitHubIssueRecord)
     fun recover(issue: GitHubIssueRecord)
     fun step(issue: GitHubIssueRecord): TaskProgress
+    fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume = ReviewResume.NOT_APPLICABLE
+    /** True when a bytecode-only review hold was cleared and the saved PASS review may publish. */
+    fun continueBytecodeReviewHold(issue: GitHubIssueRecord): Boolean = false
+    /** True only when a succeeded review is already waiting for the single Draft PR. */
+    fun publicationReady(issue: GitHubIssueRecord): Boolean = false
     fun cancel(issue: GitHubIssueRecord): TaskProgress = TaskProgress("cancelled", reason="NOT_STARTED")
     fun summary(issue: GitHubIssueRecord): String = ""
     fun checkRemote(issue: GitHubIssueRecord,id: String): String = error("REMOTE_DISABLED")
@@ -29,6 +41,8 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
     private val publicationPush: PublicationPush = GitHubBranchPush(token),
     private val fetch: (GitHubIssueRecord,Path,Path) -> Unit = { i,c,a -> fetchPersonalCheckout(token,i,c,a,permitted) },
     private val remoteOverride: RemoteExecutionSettings? = null,
+    private val cursorOverride: CursorCloudSettings? = null,
+    private val cliOverride: CursorCliSettings? = null,
     private val fixtureCli: Boolean = false,
 ) : TaskRuntime {
     private val remote by lazy { if(config.runtimeMode=="ssh-vm") remoteOverride ?: requireNotNull(config.ssh).let { ssh ->
@@ -36,21 +50,44 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         RemoteExecutionSettings(ssh.peer, transport, codexPath=config.codex.toString(),
             expectedCodexSha256=config.codexSha256, liveExecution={ transport.liveExecution() })
     } else null }
+    private val cursor by lazy {
+        if(config.selectedProfile()!="cloud-api") null
+        else cursorOverride ?: CursorCloudSettings(api=CursorCloudHttpApi(), fetch=PersonalGitFetcher(token))
+    }
+    private val cli by lazy {
+        if(config.selectedProfile()!="default") null
+        else cliOverride ?: config.cursorCli?.let { CursorCliSettings(it, Path.of(System.getenv("HOME") ?: System.getProperty("user.home"))) }
+    }
     private val repo=SMOKE_TARGET.repositoryId
     private val mapper=ObjectMapper()
     private fun root(i: GitHubIssueRecord)=config.root.resolve("task-${i.githubIssueId}")
     private fun database(i: GitHubIssueRecord)=root(i).resolve("run.db")
     private fun serviceDb()=config.root.resolve("service.db")
-    private fun limits(i: GitHubIssueRecord)=readExecutionLimits(serviceDb(), i.issueNumber)
+    private fun limits(i: GitHubIssueRecord)=limitsFor(i)
+    private fun limitsFor(i: GitHubIssueRecord): ExecutionLimits {
+        val owner=readExecutionLimits(serviceDb(), i.issueNumber)
+        if (ownerLimitsExist(i.issueNumber)) return owner
+        val pinned=if (Files.isRegularFile(database(i))) ExecutionProfileCatalog(database(i)).pinned("issue-${i.githubIssueId}") else null
+        return if (pinned==null) owner else ExecutionLimits(pinned.maxCorrections, pinned.stageTimeoutSeconds, pinned.stageTimeoutSeconds)
+    }
+    private fun ownerLimitsExist(issueNumber: Int): Boolean {
+        val file=serviceDb()
+        if (!Files.isRegularFile(file)) return false
+        return dev.orchestrator.storage.RuntimeDatabase(file).read { c ->
+            if (c.rows("SELECT 1 FROM sqlite_master WHERE name='owner_limits'") { 1 }.isEmpty()) false
+            else c.rows("SELECT 1 FROM owner_limits WHERE scope IN ('default', ?)", "issue:$issueNumber") { 1 }.isNotEmpty()
+        }
+    }
     private fun engine(i: GitHubIssueRecord): WorkflowEngine {
         val phase=if (Files.isRegularFile(database(i))) SqliteTaskStore(database(i)).findWorkflow(repo,i.issueNumber)?.phase else null
-        val seconds=if (phase==WorkflowPhase.REVIEWING) limits(i).reviewTimeoutSeconds else limits(i).codingTimeoutSeconds
+        val chosen=limitsFor(i)
+        val seconds=if (phase==WorkflowPhase.REVIEWING) chosen.reviewTimeoutSeconds else chosen.codingTimeoutSeconds
         return WorkflowEngine(database(i),repo,config.codex,config.home,
-            root(i).resolve("artifacts"),root(i).resolve("snapshots"),config.minimumTests,2,
+            root(i).resolve("artifacts"),root(i).resolve("snapshots"),config.minimumTests,chosen.maxCorrections,
             Duration.ofSeconds(seconds.toLong()),proxyPort=config.proxyPort,ownerGo={ permitted(i) },remote=remote,
-            ownerCorrectionCeiling={ limits(i).maxCorrections },
+            ownerCorrectionCeiling={ chosen.maxCorrections },
             stopRequested={ ownerCancelRequested(config.root, i.issueNumber) },
-            fixtureCli=fixtureCli, expectedCodexSha256=config.codexSha256)
+            fixtureCli=fixtureCli, expectedCodexSha256=config.codexSha256, cursor=cursor, cli=cli)
     }
     private fun terminalOrHeld(w: WorkflowSnapshot): TaskProgress = when (w.holdReason) {
         "STAGE_TIMEOUT" -> TaskProgress("timed_out", reason=w.holdReason)
@@ -58,8 +95,14 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         else -> TaskProgress("held", reason=w.holdReason)
     }
     private fun requireSite(i: GitHubIssueRecord) {
-        val site=RemoteWorkflowBridge.site(database(i),"issue-${i.githubIssueId}")
-        check(if(remote==null) site==null else site==remote!!.peer) { "EXECUTION_SITE_CHANGED" }
+        val id="issue-${i.githubIssueId}"
+        val remoteSite=RemoteWorkflowBridge.site(database(i),id)
+        val cursorSite=CursorCloudWorkflowBridge.site(database(i),id)
+        when(config.runtimeMode) {
+            "cursor-cloud" -> check(cursorSite=="api.cursor.com" && remoteSite==null) { "EXECUTION_SITE_CHANGED" }
+            "ssh-vm" -> check(remoteSite==remote!!.peer && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+            else -> check(remoteSite==null && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+        }
     }
     private fun publisher(i: GitHubIssueRecord)=DraftPrPublisher(database(i),root(i).resolve("publisher"),i.baseSha,
         GitHubPublicationApi(publicationHttp),publicationPush,{ plan,_ ->
@@ -92,22 +135,32 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         check(store.updatePolicyFromTrustedOwner(policy.copy(version=2,personalAutoExecution=true),1,
             "owner:personal-service","Local PERSONAL configuration; fixed repository only"))
         store.acceptGitHubIssue(issue,"issue-${issue.githubIssueId}")
+        val workflowId="issue-${issue.githubIssueId}"
+        val selected=config.selectedProfile()
+        if (selected!="legacy") ExecutionProfileCatalog(database(issue)).pinLatest(workflowId, selected)
         val catalog=SqliteAgentCatalog(database(issue))
-        catalog.declareManifest(AgentCapabilityManifest("codex-cli","openai",1,setOf(AgentRole.CODING,AgentRole.REVIEW),
+        val adapter=when(selected) {
+            "cloud-api" -> "cursor-cloud"
+            "default" -> "cursor-cli"
+            else -> "codex-cli"
+        }
+        val provider=if(adapter=="codex-cli") "openai" else "cursor"
+        catalog.declareManifest(AgentCapabilityManifest(adapter,provider,1,setOf(AgentRole.CODING,AgentRole.REVIEW),
             setOf(AgentSandbox.NATIVE_PERSONAL_WRITE,AgentSandbox.NATIVE_PERSONAL_READ_ONLY),
             mapOf(config.model to setOf(ReasoningEffort.DEFAULT))),null,"owner:personal-service")
         for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
             val id=role.name.lowercase()
-            catalog.saveProfile(AgentProfile(id,1,repo,role,"codex-cli",1,"openai",config.model,ReasoningEffort.DEFAULT,
+            catalog.saveProfile(AgentProfile(id,1,repo,role,adapter,1,provider,config.model,ReasoningEffort.DEFAULT,
                 if (role==AgentRole.CODING) AgentSandbox.NATIVE_PERSONAL_WRITE else AgentSandbox.NATIVE_PERSONAL_READ_ONLY,
                 StageBudget.MAX_SECONDS,100_000),null,"owner:personal-service")
             catalog.bindRole(repo,role,id,1,null,"owner:personal-service")
         }
-        if(remote==null) for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
+        if(remote==null && cursor==null && cli==null) for (role in listOf(AgentRole.CODING,AgentRole.REVIEW)) {
             check(NativeCodexCliPreflight(store,catalog).inspect(CodexNativeProbeRequest(repo,role,checkout,
                 issue.baseSha,config.codex,Path.of("/usr/bin/git"))) is CodexProbeResult.FlagsOnly)
         }
         remote?.let { RemoteWorkflowBridge.pin(database(issue),"issue-${issue.githubIssueId}",it.peer) }
+        if(cursor!=null) CursorCloudWorkflowBridge.pin(database(issue),"issue-${issue.githubIssueId}")
         check(CodingAttemptJournal(database(issue)).plan(repo,issue.issueNumber,0,"issue-${issue.githubIssueId}-coding-0",
             checkout,git("rev-parse","HEAD^{tree}"))!=null)
     }
@@ -122,6 +175,8 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
         if (Files.isRegularFile(dbFile)) {
             LocalProcessControl.stopOrphans(dbFile)
             if (config.ssh!=null) LocalProcessControl.cancelGuests(dbFile, config.ssh)
+            if (cursor!=null && !CursorCloudWorkflowBridge.cancelOutstanding(dbFile, cursor!!.api))
+                return TaskProgress("held", reason="EFFECT_OR_PROCESS_UNCONFIRMED")
         }
         if (!Files.isRegularFile(dbFile)) return TaskProgress("cancelled", reason="NOT_STARTED")
         val store=SqliteTaskStore(dbFile)
@@ -167,6 +222,27 @@ internal class PersonalRuntime(private val config: PersonalConfig, private val t
             }
         }
     } catch (_: Exception) { "Отчёт: сохранённые итоги не прочитаны. Сырые логи не публикуются." }
+    override fun publicationReady(issue: GitHubIssueRecord): Boolean {
+        val dbFile = database(issue)
+        if (!Files.isRegularFile(dbFile)) return false
+        val workflow = SqliteTaskStore(dbFile).findWorkflow(repo, issue.issueNumber) ?: return false
+        if (workflow.phase != WorkflowPhase.READY_FOR_PR || workflow.hold != WorkflowHold.NONE) return false
+        return RuntimeDatabase(dbFile).read { c ->
+            val states = c.rows("SELECT state FROM agent_attempts WHERE workflow_id=? AND role='REVIEW'", workflow.id) { it.getString(1) }
+            val open = states.any { it in setOf("PLANNED", "STARTING", "RUNNING") }
+            val hasCli = c.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cli_stage_runs'") { 1 }.isNotEmpty()
+            val launching = hasCli && c.rows("SELECT 1 FROM cli_stage_runs WHERE workflow_id=? AND state='LAUNCHING'", workflow.id) { 1 }.isNotEmpty()
+            states.any { it == "SUCCEEDED" } && !open && !launching
+        }
+    }
+    override fun resumeSavedReview(issue: GitHubIssueRecord): ReviewResume {
+        if (cli == null || !Files.isRegularFile(database(issue))) return ReviewResume.NOT_APPLICABLE
+        return engine(issue).resumeCliReview(issue.issueNumber)
+    }
+    override fun continueBytecodeReviewHold(issue: GitHubIssueRecord): Boolean {
+        if (!Files.isRegularFile(database(issue))) return false
+        return try { engine(issue).continueBytecodeReviewHold(issue.issueNumber) } catch (_: Exception) { false }
+    }
     override fun step(issue: GitHubIssueRecord): TaskProgress {
         check(permitted(issue))
         if (ownerCancelRequested(config.root, issue.issueNumber)) return cancel(issue)

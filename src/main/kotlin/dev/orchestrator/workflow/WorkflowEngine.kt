@@ -48,6 +48,8 @@ internal class WorkflowEngine(
     internal val stopRequested: () -> Boolean = { false },
     internal val fixtureCli: Boolean = false,
     private val expectedCodexSha256: String? = null,
+    private val cursor: dev.orchestrator.cursor.CursorCloudSettings? = null,
+    private val cli: dev.orchestrator.profile.CursorCliSettings? = null,
 ) {
     internal val store = SqliteTaskStore(database)
     internal val db = RuntimeDatabase(database)
@@ -57,10 +59,13 @@ internal class WorkflowEngine(
     private val probe = BoundedNativeProbeReader(maxOutputBytes=1_000_000)
 
     private val remoteBridge by lazy { remote?.let { RemoteWorkflowBridge(this,it) } }
+    private val cursorBridge by lazy { cursor?.let { dev.orchestrator.cursor.CursorCloudWorkflowBridge(this,it) } }
+    private val cliBridge by lazy { cli?.let { dev.orchestrator.profile.CursorCliWorkflowBridge(this,it) } }
 
     init {
         require(repositoryId>0 && minimumTests in 1..10000 && correctionLimit in 0..2)
         require(timeout.toMillis() in 50L..StageBudget.MAX_MILLIS && proxyPort in 1..65535)
+        require(listOf(remote!=null, cursor!=null, cli!=null).count { it } <= 1)
     }
 
     /** One persisted action per call. Repeated terminal/pending calls do not launch twice. */
@@ -70,8 +75,8 @@ internal class WorkflowEngine(
         if (w.hold!=WorkflowHold.NONE || !ownerGo()) return "NEEDS_OWNER"
         if (stopRequested()) return cancelIfQuiet(issueNumber)
         return when (w.phase) {
-            WorkflowPhase.VERIFYING -> verifyCompletedCoding(issueNumber)
-            WorkflowPhase.REVIEWING -> launchReview(issueNumber)
+            WorkflowPhase.VERIFYING -> cursorBridge?.execute(issueNumber,"TESTS") ?: cliBridge?.execute(issueNumber,"TESTS") ?: verifyCompletedCoding(issueNumber)
+            WorkflowPhase.REVIEWING -> cursorBridge?.execute(issueNumber,"REVIEW") ?: cliBridge?.execute(issueNumber,"REVIEW") ?: launchReview(issueNumber)
             WorkflowPhase.QUEUED -> {
                 val capped = db.read { c -> c.rows("SELECT correction_limit FROM workflow_verifications WHERE workflow_id=? AND generation=?",
                     w.id,w.correctionsUsed) { it.getInt(1) }.singleOrNull() }?.let { minOf(it, ownerCorrectionCeiling().coerceIn(0,2)) }
@@ -87,6 +92,8 @@ internal class WorkflowEngine(
             }
             WorkflowPhase.CODING -> {
                 val intent = latestCoding(w.id) ?: return "NO_CODING"
+                cursorBridge?.let { return it.execute(issueNumber,"CODING") }
+                cliBridge?.let { return it.execute(issueNumber,"CODING") }
                 remoteBridge?.let { return it.execute(issueNumber,"CODING") }
                 NativeCodingRunner(database,repositoryId,codex,home,artifactRoot,git,python,timeout,
                     proxyPort=proxyPort,ownerGo=ownerGo,stopRequested=stopRequested,fixtureCli=fixtureCli,
@@ -319,6 +326,8 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     /** Call on exclusive controller recovery, never while another controller is actively running. */
     fun recover(issueNumber: Int = 1): Int {
         store.findWorkflow(repositoryId,issueNumber)?.let { requireExecutionSite(it.id) }
+        cursorBridge?.let { return it.recover(issueNumber) }
+        cliBridge?.let { return it.recover(issueNumber) }
         remoteBridge?.let { return it.recover(issueNumber) }
         val workflow = store.findWorkflow(repositoryId,issueNumber) ?: return 0
         if (store.findPolicy(repositoryId)?.kind!=ProjectKind.PERSONAL) return 0
@@ -345,11 +354,66 @@ CHANGES_REQUIRED must include concrete nonempty string findings. PASS must have 
     }
 
     private fun requireExecutionSite(workflow: String) {
-        val site=RemoteWorkflowBridge.site(database,workflow)
-        check(if(remote==null) site==null else site==remote.peer) { "EXECUTION_SITE_CHANGED" }
+        val remoteSite=RemoteWorkflowBridge.site(database,workflow)
+        val cursorSite=dev.orchestrator.cursor.CursorCloudWorkflowBridge.site(database,workflow)
+        check(remoteSite==null || cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+        when {
+            cursor!=null -> check(cursorSite==cursor.peer) { "EXECUTION_SITE_CHANGED" }
+            remote!=null -> check(remoteSite==remote.peer) { "EXECUTION_SITE_CHANGED" }
+            else -> check(remoteSite==null && cursorSite==null) { "EXECUTION_SITE_CHANGED" }
+        }
     }
-    fun checkRemote(id: String): String = requireNotNull(remoteBridge).checkRemote(id)
-    fun resumeRemote(id: String,digest: String): Boolean = requireNotNull(remoteBridge).resume(id,digest)
+    fun resumeCliReview(issueNumber: Int): dev.orchestrator.profile.ReviewResume =
+        cliBridge?.resumeSaved(issueNumber) ?: dev.orchestrator.profile.ReviewResume.NOT_APPLICABLE
+
+    /**
+     * A PASS review already stored, held only because bytecode bytes changed, may move to the
+     * single Draft PR. This does not spawn a reviewer and does not clear any other hold.
+     */
+    fun continueBytecodeReviewHold(issueNumber: Int): Boolean {
+        val w = store.findWorkflow(repositoryId, issueNumber) ?: return false
+        if (w.phase != WorkflowPhase.REVIEWING || w.hold != WorkflowHold.NEEDS_OWNER ||
+            w.holdReason != "CORRECTION_LIMIT_OR_REVIEW_BINDING") return false
+        val states = db.read { c ->
+            c.rows("SELECT state FROM agent_attempts WHERE workflow_id=? AND role='REVIEW'", w.id) { it.getString(1) }
+        }
+        if (states.any { it in setOf("PLANNED", "STARTING", "RUNNING") } || states.none { it == "SUCCEEDED" }) return false
+        val launching = db.read { c ->
+            val present = c.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cli_stage_runs'") { 1 }.isNotEmpty()
+            present && c.rows("SELECT 1 FROM cli_stage_runs WHERE workflow_id=? AND state='LAUNCHING'", w.id) { 1 }.isNotEmpty()
+        }
+        if (launching) return false
+        val verified = verification(w.id, w.correctionsUsed) ?: return false
+        val candidate = try { FrozenCandidate.reopen(Path.of(verified.directory), verified.manifestSha256) } catch (_: Exception) { return false }
+        val detail = db.read { c ->
+            c.rows("""SELECT detail FROM workflow_events WHERE workflow_id=? AND event_type='REVIEW_COMPLETED'
+                ORDER BY event_id DESC LIMIT 1""", w.id) { it.getString(1) }.singleOrNull()
+        } ?: return false
+        val saved = try { mapper.readTree(detail) } catch (_: Exception) { return false }
+        val findings = saved.path("findings")
+        if (!findings.isArray || findings.any { !it.isTextual || it.asText().isBlank() }) return false
+        val verdict = try { ReviewVerdict.valueOf(saved.path("receipt").path("verdict").asText()) } catch (_: Exception) { return false }
+        if (verdict != ReviewVerdict.PASS || findings.size() != 0) return false
+        val receipt = try {
+            val node = saved.path("receipt")
+            ReviewReceipt(node.path("candidateId").asText(), node.path("reviewerAttemptId").asText(),
+                node.path("reviewerSessionId").asText(), node.path("candidateManifestSha256").asText(),
+                node.path("candidateTree").asText(), node.path("codingGeneration").asInt(-1), verdict)
+        } catch (_: Exception) { return false }
+        val disposition = try {
+            ReviewEvidencePolicy.evaluate(candidate, receipt, candidate.manifestSha256, w.correctionsUsed, limit(w.id, w.correctionsUsed))
+        } catch (_: Exception) { return false }
+        if (disposition != ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS) return false
+        return db.write { c ->
+            val changed = c.mutate("""UPDATE workflows SET phase='READY_FOR_PR', hold='NONE', hold_reason=NULL, version=version+1, updated_at=?
+                WHERE workflow_id=? AND phase='REVIEWING' AND hold='NEEDS_OWNER' AND hold_reason='CORRECTION_LIMIT_OR_REVIEW_BINDING'""",
+                now(), w.id)
+            if (changed == 1) event(c, w.id, "REVIEW_SOURCE_INTACT", "bytecode ignored")
+            changed == 1
+        }
+    }
+    fun checkRemote(id: String): String = cursorBridge?.check(id) ?: requireNotNull(remoteBridge).checkRemote(id)
+    fun resumeRemote(id: String,digest: String): Boolean = cursorBridge?.resume(id,digest) ?: requireNotNull(remoteBridge).resume(id,digest)
 
     private fun trustedCodingCompletion(intent: CodingIntent): Pair<String,String> {
         val events = store.listEvents(intent.workflowId)

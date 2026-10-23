@@ -120,7 +120,7 @@ internal class GitHubPublicationApi(private val http: PublicationHttp) {
             "head" to plan.headBranch,"base" to plan.baseBranch,"draft" to true,
             "maintainer_can_modify" to false,"body" to "Implements #${plan.issueNumber}.\n\n"+
                 "DevOrchestrator workflow ${plan.workflowId}; candidate ${plan.candidateId}.\n"+
-                "Tree ${plan.candidateTree}; manifest ${plan.candidateManifestSha256}.\n"+
+                "Tree ${plan.commitTree}; manifest ${plan.candidateManifestSha256}.\n"+
                 "Saved controller tests PASS; independent Review PASS. Merge is Owner-only."))
         val r=http.request("POST","$root/pulls",body)
         check(r.status==201)

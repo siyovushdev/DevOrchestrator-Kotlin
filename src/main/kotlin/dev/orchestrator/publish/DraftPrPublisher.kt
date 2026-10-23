@@ -11,6 +11,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.time.Instant
 
 internal data class PublicationResult(val status: String, val url: String? = null)
 
@@ -47,12 +48,14 @@ internal class DraftPrPublisher(
             if (plan==null) {
                 check(w.phase==WorkflowPhase.READY_FOR_PR)
                 val dir=privateDirectory(publisherRoot.resolve(w.id))
-                stage(evidence,dir)
+                val published=stage(evidence,dir)
                 val candidate=evidence.candidate
-                val content=commitBytes(candidate.binding.candidateTree,w.id,candidate.candidateId,candidate.manifestSha256)
+                val commitTime=Instant.now().epochSecond
+                val content=commitBytes(published,w.id,candidate.candidateId,candidate.manifestSha256,commitTime)
                 plan=PublicationPlan(w.id,target.repositoryId,issueNumber,target.owner,target.name,"main",expectedBase,
                     objectId(content),candidate.binding.candidateTree,candidate.manifestSha256,candidate.candidateId,
-                    evidence.coding.attemptId,evidence.reviewer,w.correctionsUsed,evidence.coding.policyVersion,w.version)
+                    evidence.coding.attemptId,evidence.reviewer,w.correctionsUsed,evidence.coding.policyVersion,w.version,
+                    published,commitTime)
                 Files.write(dir.resolve("commit.txt"),content,CREATE_NEW)
                 check(journal.prepare(plan))
             }
@@ -78,7 +81,7 @@ internal class DraftPrPublisher(
                 val receipt: PublicationReadBack=when (kind) {
                     EffectKind.COMMIT -> {
                         check(Files.readAllBytes(dir.resolve("commit.txt")).contentEquals(commitBytes(
-                            plan.candidateTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256)))
+                            plan.commitTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256,plan.commitTime)))
                         check(local(dir,"hash-object","-t","commit","-w",dir.resolve("commit.txt").toString())==plan.commitSha)
                         localCommit(plan)
                     }
@@ -152,7 +155,7 @@ internal class DraftPrPublisher(
             plan.candidateId==e.candidate.candidateId && plan.codingAttemptId==e.coding.attemptId &&
             plan.reviewerAttemptId==e.reviewer && plan.generation==e.w.correctionsUsed &&
             plan.policyVersion==e.coding.policyVersion &&
-            plan.commitSha==objectId(commitBytes(plan.candidateTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256)))
+            plan.commitSha==objectId(commitBytes(plan.commitTree,plan.workflowId,plan.candidateId,plan.candidateManifestSha256,plan.commitTime)))
         check(e.w.version==plan.workflowVersion+(if (e.w.phase==WorkflowPhase.READY_FOR_PR) 0 else 1) || e.w.hold!=WorkflowHold.NONE)
     }
 
@@ -190,13 +193,20 @@ internal class DraftPrPublisher(
         }
         val events=store.listEvents(w.id)
         fun started(type: String,n: JsonNode) = events.filter { it.type==type }.map { mapper.readTree(it.detail) }
-            .any { birthMatches(n,it) }
+            .any { birthMatches(n,it) || birthMatches(n,it.path("identity")) }
         val remote=dev.orchestrator.workflow.RemoteWorkflowBridge.site(database,w.id)!=null
-        if(!remote) check(started("VERIFICATION_PROCESS_STARTED",raw.path("process")))
-        val completion=events.filter { it.type==if(remote) "REMOTE_CODING_COMPLETED" else "CODING_PROCESS_SUCCEEDED" }.map { mapper.readTree(it.detail) }
+        val cursor=dev.orchestrator.cursor.CursorCloudWorkflowBridge.site(database,w.id)!=null
+        check(!(remote && cursor))
+        if(!remote && !cursor) check(started("VERIFICATION_PROCESS_STARTED",raw.path("process")))
+        val completionType=when {
+            cursor -> "CURSOR_CODING_COMPLETED"
+            remote -> "REMOTE_CODING_COMPLETED"
+            else -> "CODING_PROCESS_SUCCEEDED"
+        }
+        val completion=events.filter { it.type==completionType }.map { mapper.readTree(it.detail) }
             .single { it.path("attempt_id").asText()==intent.attemptId }
-        clean(completion.path("observed"))
-        if(!remote) {
+        if(!cursor) clean(completion.path("observed"))
+        if(!remote && !cursor) {
         val codingBirth=events.filter { it.type=="CODING_PROCESS_STARTED" }.map { mapper.readTree(it.detail) }
             .single { it.path("attempt_id").asText()==intent.attemptId }.path("identity")
         check(birthMatches(completion.path("observed"),codingBirth))
@@ -210,8 +220,8 @@ internal class DraftPrPublisher(
             completion.path("assignment_version").asLong()==intent.assignmentVersion && completion.path("manifest_version").asLong()==intent.manifestVersion)
         val reviews=events.filter { it.type=="REVIEW_COMPLETED" }.map { mapper.readTree(it.detail) }
         val review=reviews.single { it.path("receipt").path("codingGeneration").asInt(-1)==w.correctionsUsed }
-        clean(review.path("process"))
-        if(!remote) check(started("REVIEW_PROCESS_STARTED",review.path("process")))
+        if(!cursor) clean(review.path("process"))
+        if(!remote && !cursor) check(started("REVIEW_PROCESS_STARTED",review.path("process")))
         val r=review.path("receipt")
         val receipt=ReviewReceipt(r.path("candidateId").asText(),r.path("reviewerAttemptId").asText(),r.path("reviewerSessionId").asText(),
             r.path("candidateManifestSha256").asText(),r.path("candidateTree").asText(),r.path("codingGeneration").asInt(-1),
@@ -223,6 +233,7 @@ internal class DraftPrPublisher(
             ReviewEvidencePolicy.evaluate(candidate,receipt,candidate.manifestSha256,w.correctionsUsed,2)==ReviewDisposition.ELIGIBLE_FOR_CONTROLLER_CHECKS &&
             reviews.none { it!==review && it.path("receipt").path("reviewerSessionId").asText()==receipt.reviewerSessionId })
         if(remote) dev.orchestrator.workflow.RemotePublicationEvidence.validate(database,policy.workspaceRoot,w,candidate,raw,intent,completion,review)
+        if(cursor) dev.orchestrator.cursor.CursorPublicationEvidence.validate(database,policy.workspaceRoot,w,candidate,completion,review)
         db.read { c ->
             check(c.rows("""SELECT 1 FROM review_inputs r JOIN agent_attempts a ON a.attempt_id=r.attempt_id
                 JOIN attempt_contexts x ON x.attempt_id=a.attempt_id WHERE r.attempt_id=? AND r.workflow_id=? AND r.generation=?
@@ -274,7 +285,7 @@ internal class DraftPrPublisher(
             events.none { it.path("type").asText() in setOf("error","turn.failed") })
         return events.single { it.path("type").asText()=="thread.started" }.path("thread_id").asText()
     }
-    private fun stage(e: Evidence, dir: Path) {
+    private fun stage(e: Evidence, dir: Path): String {
         check(TrustedGitCheckoutGuard.accepts(e.coding.workspace))
         val head=probe.read(listOf(git.toString(),"--git-dir=${e.coding.workspace.resolve(".git")}","rev-parse","HEAD"),e.coding.workspace)
         check(head is ProbeProcessResult.Exited && head.exitCode==0 && head.output.trim()==expectedBase)
@@ -286,13 +297,17 @@ internal class DraftPrPublisher(
         local(dir,"--work-tree=${e.candidate.filesDirectory}","read-tree","--empty")
         command(e.candidate.filesDirectory,listOf("--git-dir=${dir.resolve("objects.git")}",
             "--work-tree=${e.candidate.filesDirectory}","-c","core.hooksPath=/dev/null","add","--force","--all","--","."))
-        check(local(dir,"write-tree")==e.candidate.binding.candidateTree && e.candidate.isIntact())
+        val bytecode=local(dir,"ls-files").lineSequence().filter { it.isNotBlank() && isUnpublishedPythonBytecode(it) }.toList()
+        for (path in bytecode) local(dir,"rm","--cached","--",path)
+        val published=local(dir,"write-tree")
+        check(published==e.candidate.binding.candidateTree && e.candidate.isIntact())
+        return published
     }
     private fun localCommit(plan: PublicationPlan): PublicationReadBack.Commit {
         val dir=publisherRoot.resolve(plan.workflowId)
-        check(local(dir,"cat-file","commit",plan.commitSha)==commitBytes(plan.candidateTree,plan.workflowId,
-            plan.candidateId,plan.candidateManifestSha256).toString(Charsets.UTF_8).trim())
-        return PublicationReadBack.Commit(plan.commitSha,plan.candidateTree,listOf(expectedBase))
+        check(local(dir,"cat-file","commit",plan.commitSha)==commitBytes(plan.commitTree,plan.workflowId,
+            plan.candidateId,plan.candidateManifestSha256,plan.commitTime).toString(Charsets.UTF_8).trim())
+        return PublicationReadBack.Commit(plan.commitSha,plan.commitTree,listOf(expectedBase))
     }
     private fun remotePush(plan: PublicationPlan): PublicationReadBack.Push {
         api.checkBase(plan)
@@ -327,10 +342,12 @@ internal class DraftPrPublisher(
         check(result is ProbeProcessResult.Exited && result.exitCode==0)
         return result.output.trim()
     }
-    private fun commitBytes(tree: String,workflow: String,candidate: String,manifest: String): ByteArray =
-        ("tree $tree\nparent $expectedBase\nauthor DevOrchestrator <devorchestrator@users.noreply.github.com> 0 +0000\n"+
-            "committer DevOrchestrator <devorchestrator@users.noreply.github.com> 0 +0000\n\n"+
+    private fun commitBytes(tree: String,workflow: String,candidate: String,manifest: String,commitTime: Long): ByteArray {
+        require(commitTime > 0)
+        return ("tree $tree\nparent $expectedBase\nauthor DevOrchestrator <devorchestrator@users.noreply.github.com> $commitTime +0000\n"+
+            "committer DevOrchestrator <devorchestrator@users.noreply.github.com> $commitTime +0000\n\n"+
             "Implement Issue #$issueNumber\n\nWorkflow: $workflow\nCandidate: $candidate\nManifest: $manifest\n").toByteArray(Charsets.UTF_8)
+    }
     private fun objectId(bytes: ByteArray): String = MessageDigest.getInstance("SHA-1")
         .digest("commit ${bytes.size}\u0000".toByteArray()+bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun canonical(p: Path) { check(p.isAbsolute && p.normalize()==p && p.toRealPath()==p && Files.isDirectory(p,NOFOLLOW_LINKS)) }

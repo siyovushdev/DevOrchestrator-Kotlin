@@ -14,7 +14,7 @@ there is no deletion or overwrite helper. Linux POSIX file metadata is required.
 The manifest digest must be stored in trusted durable controller state.
 `reopen(directory, expectedManifestSha256)` verifies against that external digest;
 reading a digest supplied by the snapshot itself would not establish trust.
-`isIntact` rechecks candidate/directory identity, file inventory/content/size/executable mode and manifest.
+`isIntact` rechecks candidate/directory identity, file inventory/content/size/executable mode and manifest. `__pycache__` and `*.pyc` are not part of that comparison.
 Review receipts include the candidate ID; distinct captures cannot share a
 receipt even with otherwise identical content and Coding bindings.
 Snapshot mutation (including changes by a reviewer) invalidates eligibility;

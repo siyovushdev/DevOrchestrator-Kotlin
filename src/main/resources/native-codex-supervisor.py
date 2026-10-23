@@ -126,10 +126,17 @@ def run(config):
             if time.monotonic() >= cleanup_deadline:
                 break
         time.sleep(0.01)
+    # CLI sets this flag. Leftover children are already killed above. After ECHILD, a zero
+    # exit is a finished stage. Non-zero, timeout, and stop keep their cause. Adapters
+    # that do not set the flag still record descendants_after_exit.
+    final = cause or "exited"
+    if (config.get("reap_cli_descendants") and clean and root_exit == 0
+            and final == "descendants_after_exit"):
+        final = "exited"
     return {"boot_id": boot, "machine_id": machine, "supervisor": me, "child": root,
             "executed": executed,
             "exit_code": root_exit, "cleanup_echild": clean, "reaped": reaped,
-            "cause": cause or "exited"}
+            "cause": final}
 
 
 if __name__ == "__main__":

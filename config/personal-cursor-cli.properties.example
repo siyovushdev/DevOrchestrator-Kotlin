@@ -1,0 +1,24 @@
+# Default product path. Copy outside every checkout and agentHome. chmod 600 before use.
+# enabled stays false until a separate Owner GO. This file never contains a token.
+enabled=false
+runtimeMode=cursor-cli
+profile=default
+repository=siyovushdev/devorch-kotlin-e2e-smoke
+repositoryId=1424152600
+owner=siyovushdev
+# Existing canonical directories, mode 700, owned by the logged-in user. No separate Unix account.
+root=/home/LOGIN/personal-service/state
+agentHome=/home/LOGIN/personal-service/agent-home
+# Absolute path of the already logged-in Cursor CLI (`agent`). The stage fails if it is missing.
+cursorCli=/usr/local/bin/agent
+# account-default omits --model and uses the logged-in account. auth is subscription, not an API key.
+model=account-default
+minimumTests=1
+pollSeconds=90
+# Do not set codex, codexSha256, sshIdentityFile, sshKnownHosts, or CURSOR_API_KEY.
+# Profile default: runtime cli, auth subscription, maxCorrections 2, stage timeout 1200s (cap 3600s).
+# Select profile=cloud-api only in personal-cursor-cloud.properties.example.
+# DEVORCH_PERSONAL_TOKEN belongs only in the process environment.
+#   dev-orchestrator-kotlin limits /absolute/personal.properties default 2 1200 1200
+#   dev-orchestrator-kotlin exclude /absolute/personal.properties 6 5927591593
+#   dev-orchestrator-kotlin cancel /absolute/personal.properties ISSUE

@@ -163,11 +163,14 @@ internal class PublicationJournal(database: Path) {
     private fun readPlan(c: Connection,w: String): PublicationPlan? =
         c.rows("SELECT plan_json FROM publication_plans WHERE workflow_id=?",w) { r ->
             val n = mapper.readTree(r.getString(1))
+            val candidateTree = n["candidateTree"].asText()
             PublicationPlan(n["workflowId"].asText(),n["repositoryId"].asLong(),n["issueNumber"].asInt(),
                 n["owner"].asText(),n["repository"].asText(),n["baseBranch"].asText(),n["baseSha"].asText(),
-                n["commitSha"].asText(),n["candidateTree"].asText(),n["candidateManifestSha256"].asText(),n["candidateId"].asText(),
+                n["commitSha"].asText(),candidateTree,n["candidateManifestSha256"].asText(),n["candidateId"].asText(),
                 n["codingAttemptId"].asText(),n["reviewerAttemptId"].asText(),n["generation"].asInt(),
-                n["policyVersion"].asLong(),n["workflowVersion"].asLong())
+                n["policyVersion"].asLong(),n["workflowVersion"].asLong(),
+                if (n.hasNonNull("commitTree")) n["commitTree"].asText() else candidateTree,
+                if (n.has("commitTime")) n["commitTime"].asLong() else 0L)
         }.singleOrNull()
 
     private fun encode(p: PublicationPlan): String = mapper.writeValueAsString(linkedMapOf(
@@ -176,7 +179,8 @@ internal class PublicationJournal(database: Path) {
         "commitSha" to p.commitSha,"candidateTree" to p.candidateTree,"candidateManifestSha256" to p.candidateManifestSha256,
         "candidateId" to p.candidateId,
         "codingAttemptId" to p.codingAttemptId,"reviewerAttemptId" to p.reviewerAttemptId,"generation" to p.generation,
-        "policyVersion" to p.policyVersion,"workflowVersion" to p.workflowVersion))
+        "policyVersion" to p.policyVersion,"workflowVersion" to p.workflowVersion,
+        "commitTree" to p.commitTree,"commitTime" to p.commitTime))
 
     private fun event(c: Connection,w: String,type: String,detail: String,now: String) {
         c.mutate("INSERT INTO workflow_events(workflow_id,event_type,detail,recorded_at) VALUES (?,?,?,?)",w,type,detail,now)

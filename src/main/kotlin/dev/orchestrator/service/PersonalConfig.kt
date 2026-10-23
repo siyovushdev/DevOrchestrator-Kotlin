@@ -13,7 +13,17 @@ internal data class PersonalConfig(
     val runtimeMode: String = "local",
     val ssh: dev.orchestrator.remote.SshWorkerConfig? = null,
     val codexSha256: String? = null,
+    val profileId: String = "legacy",
+    val cursorCli: Path? = null,
 ) {
+    /** Explicit profile wins. Older constructors that only set runtimeMode keep that path. */
+    fun selectedProfile(): String = when {
+        profileId != "legacy" -> profileId
+        runtimeMode == "cursor-cloud" -> "cloud-api"
+        runtimeMode == "cursor-cli" -> "default"
+        else -> "legacy"
+    }
+
     companion object {
         fun read(file: Path): PersonalConfig {
             require(file.isAbsolute && file.normalize()==file && file.toRealPath()==file)
@@ -29,7 +39,18 @@ internal data class PersonalConfig(
             fun directory(key: String): Path = Path.of(p.getProperty(key)).also {
                 require(it.isAbsolute && it.normalize()==it && it.toRealPath()==it && Files.isDirectory(it,NOFOLLOW_LINKS))
             }
-            val mode=p.getProperty("runtimeMode","local"); require(mode in setOf("local","ssh-vm"))
+            val mode=p.getProperty("runtimeMode","local"); require(mode in setOf("local","ssh-vm","cursor-cloud","cursor-cli"))
+            val requested=p.getProperty("profile")
+            val profileId=when {
+                requested==null && mode=="cursor-cloud" -> "cloud-api"
+                requested==null && mode=="cursor-cli" -> "default"
+                requested==null -> "legacy"
+                else -> requested
+            }
+            require(profileId.matches(Regex("[a-z][a-z0-9-]{0,63}")))
+            require(mode!="cursor-cli" || profileId=="default")
+            require(mode!="cursor-cloud" || profileId=="cloud-api")
+            require(mode in setOf("cursor-cli","cursor-cloud") || profileId=="legacy")
             val root=directory("root"); val home=directory("agentHome")
             require(Files.getPosixFilePermissions(root).none { it.name.startsWith("GROUP_") || it.name.startsWith("OTHERS_") })
             require(Files.getOwner(root).name==System.getProperty("user.name"))
@@ -37,9 +58,16 @@ internal data class PersonalConfig(
                 "Controller HOME or its ancestor cannot be delegated"
             }
             require(root!=home && !root.startsWith(home) && !home.startsWith(root))
-            val binary=Path.of(p.getProperty("codex"))
-            require(binary.isAbsolute && binary.toString().matches(Regex("/[A-Za-z0-9._+/-]{1,400}")))
-            val pin=p.getProperty("codexSha256")?.trim()?.ifEmpty { null }
+            val binary=if(mode=="cursor-cloud" || mode=="cursor-cli") {
+                require(p.getProperty("codex")==null && p.getProperty("codexSha256")==null && p.getProperty("sshIdentityFile")==null)
+                Path.of(if (mode=="cursor-cli") "/unused/cursor-cli" else "/unused/cursor-cloud")
+            } else Path.of(p.getProperty("codex")).also {
+                require(it.isAbsolute && it.toString().matches(Regex("/[A-Za-z0-9._+/-]{1,400}")))
+            }
+            val cursorCli=if(mode=="cursor-cli") Path.of(requireNotNull(p.getProperty("cursorCli"))).also {
+                require(it.isAbsolute && it.toString().matches(Regex("/[A-Za-z0-9._+/-]{1,400}")))
+            } else null
+            val pin=if(mode=="cursor-cloud" || mode=="cursor-cli") null else p.getProperty("codexSha256")?.trim()?.ifEmpty { null }
             if(pin!=null) require(pin.matches(Regex("[0-9a-f]{64}"))) { "CODEX_SHA256" }
             val model=requireNotNull(p.getProperty("model"))
             require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")))
@@ -48,7 +76,7 @@ internal data class PersonalConfig(
             val poll=p.getProperty("pollSeconds","90").toLong(); require(poll in 60..120)
             val ssh=if(mode=="ssh-vm") dev.orchestrator.remote.SshWorkerConfig(
                 Path.of(requireNotNull(p.getProperty("sshIdentityFile"))),Path.of(requireNotNull(p.getProperty("sshKnownHosts"))),binary) else null
-            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode,ssh,pin)
+            return PersonalConfig(p.getProperty("enabled","false")=="true",root,home,binary,model,minimum,port,poll,mode,ssh,pin,profileId,cursorCli)
         }
     }
 }

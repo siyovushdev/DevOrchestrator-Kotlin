@@ -1,6 +1,7 @@
 package dev.orchestrator.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import dev.orchestrator.profile.ReviewResume
 import dev.orchestrator.storage.*
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -41,6 +42,15 @@ internal class PersonalService(private val file: Path, private val github: Servi
             recorded_at TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL)""")
         c.mutate("""CREATE TABLE IF NOT EXISTS personal_failures(
             id INTEGER PRIMARY KEY, recorded_at TEXT NOT NULL, diagnostic TEXT NOT NULL)""")
+        c.mutate("""CREATE TABLE IF NOT EXISTS personal_failure_audit(
+            id INTEGER PRIMARY KEY,
+            failure_id INTEGER NOT NULL UNIQUE REFERENCES personal_failures(id),
+            recorded_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            evidence TEXT NOT NULL)""")
+        c.mutate("""CREATE TABLE IF NOT EXISTS personal_exclusions(
+            issue_id INTEGER PRIMARY KEY, number INTEGER NOT NULL UNIQUE,
+            recorded_at TEXT NOT NULL, detail TEXT NOT NULL)""")
     } }
     /** Store types and source locations, never arbitrary exception messages (may contain credentials). */
     fun recordFailure(failure: Exception): String {
@@ -49,9 +59,36 @@ internal class PersonalService(private val file: Path, private val github: Servi
         return diagnostic
     }
     private fun requireHealthy() {
-        val failure=db.read { it.rows("SELECT diagnostic FROM personal_failures ORDER BY id LIMIT 1") { it.getString(1) }.singleOrNull() }
+        val failure=db.read { it.rows("""SELECT f.diagnostic FROM personal_failures f
+            WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id)
+            ORDER BY f.id LIMIT 1""") { it.getString(1) }.singleOrNull() }
         if (failure!=null) throw ServiceStopped("SERVICE_STOPPED_REQUIRES_OWNER: $failure")
     }
+    /** The stored nested-write crash stays. A ready Draft PR may continue; any other open failure still stops. */
+    private fun acknowledgeRecoveredPublication() {
+        val open=db.read { c -> c.rows("""SELECT f.id, f.diagnostic FROM personal_failures f
+            WHERE NOT EXISTS (SELECT 1 FROM personal_failure_audit a WHERE a.failure_id=f.id)
+            ORDER BY f.id""") { it.getLong(1) to it.getString(2) } }
+        if (open.isEmpty() || open.any { !nestedRecoverWrite(it.second) }) return
+        val ready=tasks().filter { it.state=="active" && runtime.publicationReady(it.issue) }
+        if (ready.isEmpty()) return
+        val evidence=mapper.writeValueAsString(mapOf(
+            "reason" to "READY_FOR_PR",
+            "issues" to ready.map { it.issue.githubIssueId },
+            "review" to "SUCCEEDED",
+        ))
+        val now=Instant.now().toString()
+        db.write { c ->
+            for ((id, _) in open) c.mutate(
+                """INSERT OR IGNORE INTO personal_failure_audit(failure_id,recorded_at,actor,evidence) VALUES (?,?,?,?)""",
+                id, now, "controller:ready-pr", evidence,
+            )
+        }
+    }
+    private fun nestedRecoverWrite(diagnostic: String): Boolean =
+        diagnostic.contains("SQLiteException") &&
+            diagnostic.contains("holdUnreconciledStarts") &&
+            diagnostic.contains("CursorCliWorkflowBridge.recover")
     private data class Task(val issue: GitHubIssueRecord,val state: String,val stage: String,val url: String?,val reason: String?)
     private fun tasks(): List<Task> = db.read { c -> c.rows("SELECT source,state,stage,url,reason FROM personal_tasks ORDER BY number") {
         val n=mapper.readTree(it.getString(1))
@@ -59,6 +96,41 @@ internal class PersonalService(private val file: Path, private val github: Servi
             Instant.parse(n["sourceUpdatedAt"].asText()),n["title"].asText(),n["body"].asText(),n["baseSha"].asText(),true),
             it.getString(2),it.getString(3),it.getString(4),it.getString(5))
     } }
+    private fun continueBytecodeReviewHold() {
+        val held = try { tasks().filter { it.state=="held" && it.reason=="CORRECTION_LIMIT_OR_REVIEW_BINDING" } } catch (_: Exception) { return }
+        for (task in held) {
+            if (!runtime.continueBytecodeReviewHold(task.issue)) continue
+            db.write { c ->
+                c.mutate("""UPDATE personal_tasks SET state='active', stage='review', reason=NULL
+                    WHERE issue_id=? AND state='held' AND reason='CORRECTION_LIMIT_OR_REVIEW_BINDING'""", task.issue.githubIssueId)
+            }
+        }
+    }
+    private fun resumeInterruptedReview() {
+        val held = try { tasks().filter { it.state=="held" && it.reason=="INTERNAL_ACTION_ERROR" } } catch (_: Exception) { return }
+        if (held.isEmpty()) return
+        val failures = db.read { c ->
+            if (c.rows("SELECT 1 FROM sqlite_master WHERE name='personal_failures'") { 1 }.isEmpty()) emptyList()
+            else c.rows("SELECT id, diagnostic FROM personal_failures") { it.getLong(1) to it.getString(2) }
+        }
+        val parseIds = failures.filter { (_, diagnostic) ->
+            diagnostic.contains("parseVerdict") || diagnostic.contains("CursorCliWorkflowBridge.review")
+        }.map { it.first }
+        if (failures.isNotEmpty() && parseIds.isEmpty()) return
+        for (task in held) {
+            when (runtime.resumeSavedReview(task.issue)) {
+                ReviewResume.IMPORTED -> db.write { c ->
+                    if (parseIds.isNotEmpty()) c.mutate("DELETE FROM personal_failures WHERE id IN (${parseIds.joinToString(",")})")
+                    c.mutate("UPDATE personal_tasks SET state='active', stage='review', reason=NULL WHERE issue_id=? AND reason='INTERNAL_ACTION_ERROR'", task.issue.githubIssueId)
+                }
+                ReviewResume.MISSING -> db.write { c ->
+                    if (parseIds.isNotEmpty()) c.mutate("DELETE FROM personal_failures WHERE id IN (${parseIds.joinToString(",")})")
+                    c.mutate("UPDATE personal_tasks SET state='held', stage='held', reason='CLI_VERDICT_MISSING' WHERE issue_id=? AND reason='INTERNAL_ACTION_ERROR'", task.issue.githubIssueId)
+                }
+                ReviewResume.NOT_APPLICABLE -> {}
+            }
+        }
+    }
     private fun hold(i: GitHubIssueRecord,reason: String) = db.write { c ->
         if (reason=="STATUS_OUTCOME_UNKNOWN") {
             c.mutate("""UPDATE personal_tasks SET resume_state=CASE WHEN reason!='STATUS_OUTCOME_UNKNOWN' OR reason IS NULL THEN state ELSE resume_state END,
@@ -68,6 +140,9 @@ internal class PersonalService(private val file: Path, private val github: Servi
     }
     private val terminalStages=setOf("cancelled","cancel-refused","released","timed_out","unattested")
     fun recover() {
+        acknowledgeRecoveredPublication()
+        resumeInterruptedReview()
+        continueBytecodeReviewHold()
         requireHealthy()
         for(t in tasks()) {
             if (t.stage in terminalStages) continue
@@ -81,6 +156,9 @@ internal class PersonalService(private val file: Path, private val github: Servi
         }
     }
     fun tick(): String {
+        acknowledgeRecoveredPublication()
+        resumeInterruptedReview()
+        continueBytecodeReviewHold()
         requireHealthy()
         if(!permitted()) return "OFF"
         // An unresolved task blocks the entire one-worker queue, including different task databases.
@@ -98,8 +176,10 @@ internal class PersonalService(private val file: Path, private val github: Servi
             require(issues.all { it.repositoryId==1424152600L })
             require(issues.groupBy { it.githubIssueId }.values.all { it.size==1 } &&
                 issues.groupBy { it.issueNumber }.values.all { it.size==1 })
+            val excluded=db.read { c -> c.rows("SELECT issue_id,number FROM personal_exclusions") { it.getLong(1) to it.getInt(2) } }
             val next=issues.sortedBy { it.issueNumber }.firstOrNull { i ->
-                i.open && previous.none { it.issue.githubIssueId==i.githubIssueId || it.issue.issueNumber==i.issueNumber } && github.authorized(i)
+                i.open && previous.none { it.issue.githubIssueId==i.githubIssueId || it.issue.issueNumber==i.issueNumber } &&
+                    excluded.none { it.first==i.githubIssueId || it.second==i.issueNumber } && github.authorized(i)
             } ?: return "IDLE"
             check(permitted())
             db.write { it.mutate("INSERT INTO personal_tasks(issue_id,number,source,state) VALUES (?,?,?,'accepted')",
@@ -242,6 +322,26 @@ internal class PersonalService(private val file: Path, private val github: Servi
     }
 
     fun localStatus(): String = tasks().joinToString("\n") { "Issue #${it.issue.issueNumber}: ${it.state} / ${it.stage} ${it.reason.orEmpty()}${it.url?.let { u -> " $u" } ?: ""}" }.ifEmpty { "No tasks" }
+
+    /**
+     * Keeps an authorized issue out of the queue. Does not post, resume, or start an agent.
+     * Issue #6 (5927591593) is excluded this way: its earlier result stays unconfirmed.
+     */
+    fun exclude(number: Int, githubIssueId: Long): String {
+        require(number>0 && githubIssueId>0)
+        requireHealthy()
+        return db.write { c ->
+            val existing=c.rows("SELECT issue_id FROM personal_exclusions WHERE number=?", number) { it.getLong(1) }.singleOrNull()
+            if (existing!=null) return@write if (existing==githubIssueId) "EXCLUDED" else "ID_MISMATCH"
+            val task=c.rows("SELECT issue_id,state FROM personal_tasks WHERE number=?", number) { it.getLong(1) to it.getString(2) }.singleOrNull()
+            if (task!=null) return@write if (task.first==githubIssueId) "ALREADY_PRESENT" else "ID_MISMATCH"
+            c.mutate("INSERT INTO personal_exclusions(issue_id,number,recorded_at,detail) VALUES(?,?,?,?)",
+                githubIssueId, number, Instant.now().toString(), "excluded; no resume; no replay")
+            c.mutate("INSERT INTO owner_audit(recorded_at,actor,action,scope,detail) VALUES(?,?,?,?,?)",
+                Instant.now().toString(), "owner:local-command", "EXCLUDE", "issue:$number", "excluded; no resume; no replay")
+            "EXCLUDED"
+        }
+    }
 
     /** Leaves workflow holds and publication rows in place. Does not delete service.db or send PUSH/POST. */
     fun releaseHeld(number: Int, ssh: dev.orchestrator.remote.SshWorkerConfig? = null): String {

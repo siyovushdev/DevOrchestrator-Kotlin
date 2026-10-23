@@ -9,9 +9,9 @@ DevOrchestrator — собственная платформа управлени
 
 Основной интерфейс — ChatGPT, включая телефон; GitHub хранит задачи, статусы и результаты. Kotlin/JVM + SQLite на выделенном HOME PERSONAL-аккаунте выполняет задачи. В этом этапе нет новой Android/Web-панели или ChatGPT API/MCP.
 
-**Гибкие AI-агенты (PRD FR-13–FR-18, целевой контракт):** Agent Catalog + Agent Profiles для Coding/Review/Planner/Chief; выбор Codex/Cursor/другого интегрированного агента, модели и reasoning effort вручную или автоматически по задаче. Менять профили можно без остановки сервиса, но новая конфигурация применяется только к следующему attempt. Автоселектор не выдаёт дополнительных прав. В текущем M4-01 используется существующий Codex CLI; второй адаптер и AUTO routing отложены.
+**Гибкие AI-агенты (PRD FR-13–FR-18, целевой контракт):** Agent Catalog + Agent Profiles для Coding/Review/Planner/Chief. Исполнитель продукта — Cursor Cloud Agent через официальный Cloud Agents API. Coding и Review — две отдельные сессии Cursor. Контроллер сам запускает unittest, цикл исправлений, отмену, лимиты, журнал и восстановление. Codex CLI, ключ OpenAI и локальный SSH для этого пути не нужны.
 
-**Runtime первого MVP:** [ADR-003/S-04 — Native Codex CLI](docs/adr/ADR-003-MVP-native-cli-decision.md) — **APPROVED как стратегия**. Kotlin вызывает уже работающий `codex exec` в отдельной временной копии разрешённого PERSONAL тестового проекта. **Без Docker, microVM и собственного sandbox engine.** Для постоянного HOME-сервиса требуется отдельно подготовленный выделенный PERSONAL-аккаунт. Под текущим UID нет гарантии изоляции от читаемых файлов хоста; WORK/1МТ в таком профиле запрещён. Docker отложен; [ADR-003 Native](docs/adr/ADR-003-native-personal-mvp.md) утверждён **только** для личных тестовых проектов.
+**Runtime:** [ADR-006 — Cursor Cloud Agents API](docs/adr/ADR-006-cursor-cloud-agents.md). Kotlin не строит свой цикл агента: он создаёт, ждёт и отменяет агентов, которых выполняет Cursor. `autoCreatePR` выключен. Черновик PR публикует контроллер, не больше одного. Прежний локальный Codex и SSH остаются в коде для старых проверок и этим путём не вызываются.
 
 ## Документы
 

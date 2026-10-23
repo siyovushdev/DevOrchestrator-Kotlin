@@ -22,6 +22,7 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
             prompt: ByteArray, limitMs: Long, lastMessage: Path? = null,
             privateEnvironment: Map<String,String> = emptyMap(),
             namespaceCleanup: Boolean = false,
+            reapDescendants: Boolean = false,
             stopRequested: () -> Boolean = { false },
             onStarted: (Map<String,String>) -> Boolean): ProcessObservation {
         var interrupted = false
@@ -35,6 +36,7 @@ internal class NativeProcessRunner(private val python: Path, private val outputL
                 "cwd" to workspace.toString(),"env" to environment,"timeout_ms" to limitMs,
                 "private_env_names" to privateEnvironment.keys.toList(),
                 "namespace_boundary" to (namespaceCleanup || argv.firstOrNull()=="/usr/bin/bwrap"),
+                "reap_cli_descendants" to reapDescendants,
                 "receipt" to helperReceipt.toString())),CREATE_NEW,WRITE)
             val builder = ProcessBuilder(python.toRealPath().toString(),"-I","-S",helper.toString(),config.toString())
                 .directory(artifacts.toFile()).redirectErrorStream(true)

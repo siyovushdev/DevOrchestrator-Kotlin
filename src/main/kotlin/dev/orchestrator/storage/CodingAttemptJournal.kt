@@ -61,7 +61,7 @@ internal class CodingAttemptJournal(database: Path) {
             if (!safeWorkspace(workspace, policy.first)) return@write null
             val assigned = catalog.findAssignedProfile(conn, repositoryId, AgentRole.CODING)
                 ?: return@write null
-            if (!nativeCoding(assigned)) return@write null
+            if (!supportedCoding(assigned)) return@write null
             val source = conn.rows("""
                 SELECT issue_body_sha256,base_sha FROM github_issue_snapshots
                 WHERE workflow_id=? AND repository_id=? AND issue_number=?
@@ -170,7 +170,7 @@ internal class CodingAttemptJournal(database: Path) {
                 completedWorkflow=if (intent.generation>0) intent.workflowId else null)) return@write false
         val assigned = catalog.findAssignedProfile(conn, intent.repositoryId, AgentRole.CODING)
             ?: return@write false
-        if (!nativeCoding(assigned) || assigned.assignment.assignmentVersion != intent.assignmentVersion ||
+        if (!supportedCoding(assigned) || assigned.assignment.assignmentVersion != intent.assignmentVersion ||
             assigned.profile.profileId != intent.profileId || assigned.profile.version != intent.profileVersion ||
             assigned.profile.adapterId != intent.adapterId || assigned.manifest.version != intent.manifestVersion)
             return@write false
@@ -210,8 +210,10 @@ internal class CodingAttemptJournal(database: Path) {
         AND pp.personal_auto_execution=1
     """.trimIndent(), repo) { Path.of(it.getString(1)) to it.getLong(2) }.singleOrNull()
 
-    private fun nativeCoding(assigned: AssignedAgentProfile): Boolean =
-        assigned.profile.adapterId == "codex-cli" && assigned.profile.provider == "openai"
+    private fun supportedCoding(assigned: AssignedAgentProfile): Boolean =
+        assigned.profile.adapterId == "codex-cli" && assigned.profile.provider == "openai" ||
+            assigned.profile.adapterId == "cursor-cloud" && assigned.profile.provider == "cursor" ||
+            assigned.profile.adapterId == "cursor-cli" && assigned.profile.provider == "cursor"
 
     private fun conflictingAttempt(conn: Connection, repo: Long, workspace: Path, own: String? = null,
                                    completedWorkflow: String? = null): Boolean {
